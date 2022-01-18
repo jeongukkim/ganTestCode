@@ -1,8 +1,15 @@
 import torch
 import torch.nn.functional as F
+import numpy as np
 
 from torch import nn
 
+
+class Generator(nn.Module):
+  def __init__(self):
+    super(Generator, self).__init__()
+
+    pass
 
 class MappingNetwork(nn.Module):
   """ Mapping Network: Z (latent space) -> W (intermediate latent space) """
@@ -45,7 +52,7 @@ class EqualLinear(nn.Module):
 
     # Equalized Learning Rate
     # :: times sqrt(2/fan_in)
-    self.multiplier = torch.sqrt(2. / inChannels)
+    self.multiplier = np.sqrt(2. / inChannels)
 
   def forward(self, inTensor):
     return F.linear(inTensor, weight=self.weight * self.multiplier, bias=self.bias)
@@ -57,45 +64,40 @@ class SynthesisNetwork(nn.Module):
 
     pass
 
+
+
+class ToRgb(nn.Module):
+  """ Convert to RGB using output skips"""
+  def __init__(self, latentDim, inChannels):
+    super(ToRgb, self).__init__()
+
+    self.conv = ConvLayer(latentDim, inChannels, outChannels=3, kernelSize=1)
+    initZeros = torch.zeros(1, 3, 1, 1)
+    self.bias = nn.Parameter(initZeros)
+
+  def forward(self, prevTensor, inTensor, latent):
+    outTensor = self.conv(inTensor, latent, doUpsample=True, doDemod=False).add_(self.bias)
+    if prevTensor is not None:
+      outTensor += prevTensor
+
+    return outTensor
+
+
 class StyleBlock(nn.Module):
-  def __init__(self, inChannels, outChannels, kernelSize, isBias=True, latentDim=512):
+  """ Network block where ONE style is active """
+  def __init__(self, latentDim, inChannels, outChannels, kernelSize):
     super(StyleBlock, self).__init__()
 
-    self.affine = AffineNetwork(latentDim, inChannels)
-
-    h, w = [kernelSize] * 2
-    initNormalDist = torch.randn(outChannels, inChannels, h, w)
-    initZeros = torch.zeros(outChannels)
-    self.weight = nn.Parameter(initNormalDist)
-    self.bias = nn.Parameter(initZeros) if isBias else None
+    self.conv = ConvLayer(latentDim, inChannels, outChannels, kernelSize)
+    initZeros = torch.zeros(1, outChannels, 1, 1)
+    self.bias = nn.Parameter(initZeros)
 
     self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
     self.noise = NoiseInjection()
 
-  def forward(self, inTensor, latent):
-    batchSize, inChannels, imgHeight, imgWidth = inTensor.shape
-
-    # affine transformation
-    style = self.affine(latent)
-
-    # reshape to [batchSize, outChannels, inChannels, kernelSize, kernelSize]
-    style = style.reshape(batchSize, 1, -1, 1, 1)
-    weight = self.weight.unsqueeze(0)
-
-    # Modulation
-    weight = weight * style
-
-    # Demodulation
-    norm = weight.square().sum(dim=[2, 3, 4], keepdim=True).add_(1e-8).rsqrt()
-    weight *= norm
-
-    # reshape
-    inTensor = inTensor.reshape(1, -1, imgHeight, imgWidth)
-    weight = weight.reshape(-1, inChannels, *weight.shape[3:])
-
-    # Convolution
-    outTensor = F.conv2d(inTensor, weight=weight, padding="same", groups=batchSize)
-    outTensor = outTensor.reshape(-1, inChannels, imgHeight, imgWidth)
+  def forward(self, inTensor, latent, doUpsample=False):
+    # Fused Convolution
+    outTensor = self.conv(inTensor, latent, doUpsample=doUpsample, doDemod=True)
 
     # NoiseInjection -> AddBias -> Activation
     outTensor = self.noise(outTensor)
@@ -130,23 +132,54 @@ class NoiseInjection(nn.Module):
     return inTensor.add_(self.weight * noise)
 
 
-# class EqualConv2d(nn.Module):
-#   """ 2-dimensional Convolution Layer """
-#   def __init__(self, inChannels, outChannels, kernelSize, isBias=False):
-#     super(EqualConv2d, self).__init__()
-#
-#     h, w = [kernelSize] * 2
-#     initNormalDist = torch.randn(outChannels, inChannels, h, w)
-#     initZeros = torch.zeros(outChannels)
-#
-#     self.weight = nn.Parameter(initNormalDist)
-#     self.bias = nn.Parameter(initZeros) if isBias else None
-#
-#     # Equalized Learning Rate
-#     # :: times sqrt(2/fan_in)
-#     fanIn = inChannels * h * w
-#     self.multiplier = torch.sqrt(2. / fanIn)
-#
-#   def forward(self, inTensor):
-#     return F.conv2d(inTensor, weight=self.weight * self.multiplier, bias=self.bias, padding="same")
+class ConvLayer(nn.Module):
+  """ Convolution Layer in StyleGAN2 """
+  def __init__(self, latentDim, inChannels, outChannels, kernelSize):
+    super(ConvLayer, self).__init__()
+
+    self.affine = AffineNetwork(latentDim, inChannels)
+
+    h, w = [kernelSize] * 2
+    initNormalDist = torch.randn(outChannels, inChannels, h, w)
+    self.weight = nn.Parameter(initNormalDist)
+
+    # Equalized Learning Rate
+    # :: times sqrt(2/fan_in)
+    fanIn = inChannels * h * w
+    self.multiplier = np.sqrt(2. / fanIn)
+
+  def forward(self, inTensor, latent, doUpsample=False, doDownsample=False, doDemod=False):
+    assert doUpsample * doDownsample == 0
+
+    # Bilinear filtering if needed
+    if doUpsample:
+      inTensor = F.interpolate(inTensor, None, 2, 'bilinear')
+    if doDownsample:
+      inTensor = F.interpolate(inTensor, None, 0.5, 'bilinear')
+
+    batchSize, inChannels, imgHeight, imgWidth = inTensor.shape
+
+    # Affine transformation
+    style = self.affine(latent)
+
+    # Reshape to [batchSize, outChannels, inChannels, kernelSize, kernelSize]
+    style = style.reshape(batchSize, 1, -1, 1, 1)
+    weight = self.weight.unsqueeze(0)
+
+    # Modulation
+    weight = weight * style
+
+    # Demodulation if needed
+    if doDemod:
+      norm = weight.square().sum(dim=[2, 3, 4], keepdim=True).add_(1e-8).rsqrt()
+      weight *= norm
+
+    # Reshape and Group Convolution
+    inTensor = inTensor.reshape(1, -1, imgHeight, imgWidth)
+    weight = weight.reshape(-1, inChannels, *weight.shape[3:])
+
+    outTensor = F.conv2d(inTensor, weight=weight * self.multiplier, padding="same", groups=batchSize)
+    outTensor = outTensor.reshape(batchSize, -1, imgHeight, imgWidth)
+
+    return outTensor
 
