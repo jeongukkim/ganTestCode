@@ -92,11 +92,13 @@ class SynthesisNetwork(nn.Module):
 
     self.convList = nn.ModuleList()
     self.toRgbList = nn.ModuleList()
-    for resolution, channel in resolutionToChannels.items():
+    inChannel = resolutionToChannels[inputResolution]
+    for resolution, outChannel in resolutionToChannels.items():
       if resolution == 4: continue
-      self.convList.append(StyleBlock(latentDim, channel, channel, 3, doUpsample=True))
-      self.convList.append(StyleBlock(latentDim, channel, channel, 3))
-      self.toRgbList.append(ToRgb(latentDim, channel))
+      self.convList.append(StyleBlock(latentDim, inChannel, outChannel, 3, doUpsample=True))
+      self.convList.append(StyleBlock(latentDim, outChannel, outChannel, 3))
+      self.toRgbList.append(ToRgb(latentDim, outChannel))
+      inChannel = outChannel
       if resolution == targetResolution: break
 
     self._latentNum = len(self.toRgbList) + len(self.convList) + 2
