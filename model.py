@@ -154,13 +154,11 @@ class StyleBlock(nn.Module):
         self.noise = NoiseInjection()
 
     def forward(self, inTensor, latent):
-        # NoiseInjection
-        outTensor = self.noise(inTensor)
-
         # Fused Convolution
-        outTensor = self.conv(outTensor, latent)
+        outTensor = self.conv(inTensor, latent)
 
-        # AddBias -> Activation
+        # NoiseInjection -> AddBias -> Activation
+        outTensor = self.noise(outTensor)
         outTensor = F.leaky_relu(outTensor.add_(self.bias), negative_slope=0.2) * np.sqrt(2)
 
         return outTensor
@@ -218,7 +216,7 @@ class ConvLayer(nn.Module):
         fanIn = inChannels * h * w
         self._weightMultiplier = np.sqrt(1. / fanIn)
 
-    def forward(self, inTensor, latent, styleMultiplier=1):
+    def forward(self, inTensor, latent, styleMultiplier=1.):
         # Bilinear filtering if needed
         if self._doUpsample:
             inTensor = F.interpolate(inTensor, None, 2, 'bilinear')
@@ -235,7 +233,7 @@ class ConvLayer(nn.Module):
 
         # Reshape to [batchSize, outChannels, inChannels, kernelSize, kernelSize]
         style = style.reshape(batchSize, 1, -1, 1, 1)
-        weight = self.weight.unsqueeze(0)
+        weight = weight.unsqueeze(0)
 
         # Modulation
         weight = weight * style
@@ -249,7 +247,7 @@ class ConvLayer(nn.Module):
         inTensor = inTensor.reshape(1, -1, imgHeight, imgWidth)
         weight = weight.reshape(-1, *weight.shape[2:])
 
-        outTensor = F.conv2d(inTensor, weight=weight, padding=self.padding, groups=batchSize)
+        outTensor = F.conv2d(inTensor, weight=weight, padding=self._padding, groups=batchSize)
         outTensor = outTensor.reshape(batchSize, -1, *outTensor.shape[2:])
 
         return outTensor

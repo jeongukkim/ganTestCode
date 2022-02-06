@@ -7,17 +7,17 @@ from model import Generator
 torch.manual_seed(0)
 
 
-def loadMappingNetwork(srcG, dstG):
-    myDict = {}
+def loadMappingNetwork(srcG, myDict):
     for i in range(8):
         myDict[f"mapping.mapping.{i+1}.weight"] = srcG.state_dict()[f"mapping.fc{i}.weight"]
         myDict[f"mapping.mapping.{i+1}.bias"] = srcG.state_dict()[f"mapping.fc{i}.bias"]
 
-    dstG.load_state_dict(myDict, strict=False)
-
 
 def testMappingNetwork(srcG, dstG):
-    loadMappingNetwork(srcG, dstG)
+    myDict = {}
+    loadMappingNetwork(srcG, myDict)
+    # print(myDict.keys())
+    dstG.load_state_dict(myDict, strict=False)
 
     # print(srcG.state_dict()["mapping.fc0.bias"])
     # print(dstG.state_dict()["mapping.mapping.1.bias"])
@@ -25,22 +25,26 @@ def testMappingNetwork(srcG, dstG):
     latent = torch.randn([1, 512]).cuda()
     c = None
 
-    print(latent.dtype)
-
     wSrc = srcG.mapping(latent, c)
     wDst = dstG.mapping(latent)
 
-    # print(wSrc.narrow(dim=1, start=0, length=1).squeeze(dim=1))
+    wSrc = wSrc.narrow(dim=1, start=0, length=1).squeeze(dim=1).detach().cpu().numpy()
+    wDst = wDst.detach().cpu().numpy()
+
+    # print(wSrc)
     # print(wDst)
-    # print(wSrc.narrow(dim=1, start=0, length=1).squeeze(dim=1) - wDst)
+    print(wSrc - wDst)
 
 
 def testSynthesisNetwork(srcG, dstG):
-    loadConstInput(srcG, dstG)
-    loadConvBlocks(srcG, dstG)
-    loadAffineNetwork(srcG, dstG)
-    loadNoiseInjection(srcG, dstG)
-    loadToRgb(srcG, dstG)
+    myDict = {}
+    loadConstInput(srcG, myDict)
+    loadConvBlocks(srcG, myDict)
+    loadAffineNetwork(srcG, myDict)
+    loadNoiseInjection(srcG, myDict)
+    loadToRgb(srcG, myDict)
+    # print(myDict.keys())
+    dstG.load_state_dict(myDict, strict=False)
 
     # print(srcG.state_dict()["synthesis.b4.const"])
     # print(dstG.state_dict()["synthesis.input.input"])
@@ -62,26 +66,28 @@ def testSynthesisNetwork(srcG, dstG):
     imgSrc = srcG.synthesis(intermediateLatent)
     imgDst = dstG.synthesis(intermediateLatent.narrow(dim=1, start=0, length=1).squeeze(dim=1))
 
-    print(imgSrc)
-    print(imgDst)
+    # imgSrc = srcG(latent, c)
+    # imgDst = dstG(latent)
+
+    # intermediateLatent = dstG.mapping(latent)
+    # imgSrc = srcG.synthesis(intermediateLatent.unsqueeze(0).repeat(1,14,1))
+    # imgDst = dstG.synthesis(intermediateLatent)
+
+    # print(imgSrc)
+    # print(imgDst)
 
     showImg(imgSrc)
     showImg(imgDst)
 
 
-def loadConstInput(srcG, dstG):
-    myDict = {
-        "synthesis.input.input": srcG.state_dict()["synthesis.b4.const"].unsqueeze(dim=0)
-    }
-
-    dstG.load_state_dict(myDict, strict=False)
+def loadConstInput(srcG, myDict):
+    myDict["synthesis.input.input"] = srcG.state_dict()["synthesis.b4.const"].unsqueeze(dim=0)
 
 
-def loadConvBlocks(srcG, dstG):
-    myDict = {
-        "synthesis.convList.0.conv.weight": srcG.state_dict()["synthesis.b4.conv1.weight"],
-        "synthesis.convList.0.bias": srcG.state_dict()["synthesis.b4.conv1.bias"].reshape(1, -1, 1, 1)
-    }
+def loadConvBlocks(srcG, myDict):
+    myDict["synthesis.convList.0.conv.weight"] = srcG.state_dict()["synthesis.b4.conv1.weight"]
+    myDict["synthesis.convList.0.bias"] = srcG.state_dict()["synthesis.b4.conv1.bias"].reshape(1, -1, 1, 1)
+
     for i in range(1, 13, 2):
         res = int(2 ** ((i+1)/2 + 2))
         myDict[f"synthesis.convList.{i}.conv.weight"] = srcG.state_dict()[f"synthesis.b{res}.conv0.weight"]
@@ -89,14 +95,11 @@ def loadConvBlocks(srcG, dstG):
         myDict[f"synthesis.convList.{i+1}.conv.weight"] = srcG.state_dict()[f"synthesis.b{res}.conv1.weight"]
         myDict[f"synthesis.convList.{i+1}.bias"] = srcG.state_dict()[f"synthesis.b{res}.conv1.bias"].reshape(1, -1, 1, 1)
 
-    dstG.load_state_dict(myDict, strict=False)
 
+def loadAffineNetwork(srcG, myDict):
+    myDict["synthesis.convList.0.conv.affine.affine.weight"] = srcG.state_dict()["synthesis.b4.conv1.affine.weight"]
+    myDict["synthesis.convList.0.conv.affine.affine.bias"] = srcG.state_dict()["synthesis.b4.conv1.affine.bias"]
 
-def loadAffineNetwork(srcG, dstG):
-    myDict = {
-        "synthesis.convList.0.conv.affine.affine.weight": srcG.state_dict()["synthesis.b4.conv1.affine.weight"],
-        "synthesis.convList.0.conv.affine.affine.bias": srcG.state_dict()["synthesis.b4.conv1.affine.bias"]
-    }
     for i in range(1, 13, 2):
         res = int(2 ** ((i+1)/2 + 2))
         myDict[f"synthesis.convList.{i}.conv.affine.affine.weight"] = srcG.state_dict()[f"synthesis.b{res}.conv0.affine.weight"]
@@ -104,31 +107,23 @@ def loadAffineNetwork(srcG, dstG):
         myDict[f"synthesis.convList.{i+1}.conv.affine.affine.weight"] = srcG.state_dict()[f"synthesis.b{res}.conv1.affine.weight"]
         myDict[f"synthesis.convList.{i+1}.conv.affine.affine.bias"] = srcG.state_dict()[f"synthesis.b{res}.conv1.affine.bias"]
 
-    dstG.load_state_dict(myDict, strict=False)
 
+def loadNoiseInjection(srcG, myDict):
+    myDict["synthesis.convList.0.noise.weight"] = srcG.state_dict()["synthesis.b4.conv1.noise_strength"]
 
-def loadNoiseInjection(srcG, dstG):
-    myDict = {
-        "synthesis.convList.0.noise.weight": srcG.state_dict()["synthesis.b4.conv1.noise_strength"]
-    }
     for i in range(1, 13, 2):
         res = int(2 ** ((i+1)/2 + 2))
         myDict[f"synthesis.convList.{i}.noise.weight"] = srcG.state_dict()[f"synthesis.b{res}.conv0.noise_strength"]
         myDict[f"synthesis.convList.{i+1}.noise.weight"] = srcG.state_dict()[f"synthesis.b{res}.conv1.noise_strength"]
 
-    dstG.load_state_dict(myDict, strict=False)
 
-
-def loadToRgb(srcG, dstG):
-    myDict = {}
+def loadToRgb(srcG, myDict):
     for i in range(7):
         res = int(2 ** (i + 2))
         myDict[f"synthesis.toRgbList.{i}.toRgb.weight"] = srcG.state_dict()[f"synthesis.b{res}.torgb.weight"]
         myDict[f"synthesis.toRgbList.{i}.bias"] = srcG.state_dict()[f"synthesis.b{res}.torgb.bias"].reshape(1, -1, 1, 1)
         myDict[f"synthesis.toRgbList.{i}.toRgb.affine.affine.weight"] = srcG.state_dict()[f"synthesis.b{res}.torgb.affine.weight"]
         myDict[f"synthesis.toRgbList.{i}.toRgb.affine.affine.bias"] = srcG.state_dict()[f"synthesis.b{res}.torgb.affine.bias"]
-
-        dstG.load_state_dict(myDict, strict=False)
 
 
 def showImg(genOutput):
@@ -156,5 +151,6 @@ if __name__ == "__main__":
 
     testMappingNetwork(G_ema, G)
     testSynthesisNetwork(G_ema, G)
+
 
 
