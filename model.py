@@ -27,8 +27,7 @@ class MappingNetwork(nn.Module):
 
     fullyConnectedBlock = [PixelNorm()]
     for _ in range(numLayers):
-      fullyConnectedBlock.append(EqualLinear(latentDim, latentDim))
-      fullyConnectedBlock.append(nn.LeakyReLU(negative_slope=0.2, inplace=True))
+      fullyConnectedBlock.append(EqualLinear(latentDim, latentDim, lrMultiplier=0.01))
 
     self.mapping = nn.Sequential(*fullyConnectedBlock)
 
@@ -52,21 +51,28 @@ class PixelNorm(nn.Module):
 class EqualLinear(nn.Module):
   """ Fully Connected Layer """
 
-  def __init__(self, inChannels, outChannels, isBias=True):
+  def __init__(self, inChannels, outChannels, lrMultiplier=1.):
     super(EqualLinear, self).__init__()
 
-    initNormalDist = torch.randn(outChannels, inChannels)
-    initZeros = torch.zeros(outChannels)
+    self._lrMultiplier = lrMultiplier
 
+    initNormalDist = torch.randn((outChannels, inChannels)) / lrMultiplier
+    initZeros = torch.zeros((outChannels))
     self.weight = nn.Parameter(initNormalDist)
-    self.bias = nn.Parameter(initZeros) if isBias else None
+    self.bias = nn.Parameter(initZeros)
 
     # Equalized Learning Rate
     # :: times sqrt(2/fan_in)
-    self.multiplier = np.sqrt(2. / inChannels)
+    self._multiplier = np.sqrt(1. / inChannels)
 
   def forward(self, inTensor):
-    return F.linear(inTensor, weight=self.weight * self.multiplier, bias=self.bias)
+    w = self.weight * self._multiplier * self._lrMultiplier
+    b = self.bias.unsqueeze(dim=0) * self._lrMultiplier
+
+    outTensor = F.linear(inTensor, weight=w)
+    outTensor = F.leaky_relu(outTensor.add_(b), negative_slope=0.2) * np.sqrt(2)
+
+    return outTensor
 
 
 class SynthesisNetwork(nn.Module):
