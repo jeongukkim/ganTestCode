@@ -5,12 +5,37 @@ import numpy as np
 from torch import nn
 
 
+EPSILON = 1e-8
+RES_TO_CHANNELS = {
+    4: 512,
+    8: 512,
+    16: 512,
+    32: 512,
+    64: 256,
+    128: 128,
+    256: 64,
+    512: 32,
+    1024: 16
+}
+
+
 class Generator(nn.Module):
-    def __init__(self, targetResolution, numFCLayers=8, latentDim=512):
+    def __init__(self, targetResolution, latentDim=512, numFCLayers=8):
         super(Generator, self).__init__()
+
+        self._latentDim = latentDim
+        self._targetResolution = targetResolution
 
         self.mapping = MappingNetwork(latentDim=latentDim, numLayers=numFCLayers)
         self.synthesis = SynthesisNetwork(latentDim=latentDim, targetResolution=targetResolution)
+
+    @property
+    def image_resolution(self):
+        return self._targetResolution
+
+    @property
+    def latent_dimension(self):
+        return self._latentDim
 
     def forward(self, latent):
         intermediateLatent = self.mapping(latent)
@@ -25,34 +50,30 @@ class MappingNetwork(nn.Module):
     def __init__(self, latentDim=512, numLayers=8):
         super(MappingNetwork, self).__init__()
 
-        fullyConnectedBlock = [PixelNorm()]
+        self._numLayers = numLayers
+
+        fullyConnectedBlocks = []
         for _ in range(numLayers):
-            fullyConnectedBlock.append(EqualLinear(latentDim, latentDim, lrMultiplier=0.01))
+            fullyConnectedBlocks.append(LinearLayer(latentDim, latentDim, lrMultiplier=0.01))
 
-        self.mapping = nn.Sequential(*fullyConnectedBlock)
+        self.fcs = nn.Sequential(*fullyConnectedBlocks)
 
-    def forward(self, latent):
-        return self.mapping(latent)
-
-
-class PixelNorm(nn.Module):
-    """ Normalize Latent Code """
-
-    def __init__(self, eps=1e-8):
-        super(PixelNorm, self).__init__()
-
-        self._eps = eps
+    @property
+    def num_fc_layers(self):
+        return self._numLayers
 
     def forward(self, latent):
-        norm = latent.square().mean(dim=1, keepdim=True).add_(self._eps).rsqrt()
-        return latent * norm
+        latent = latent * latent.square().mean(dim=1, keepdim=True).add_(EPSILON).rsqrt()
+        intermediateLatent = self.fcs(latent)
+
+        return intermediateLatent
 
 
-class EqualLinear(nn.Module):
-    """ Fully Connected Layer """
+class LinearLayer(nn.Module):
+    """ Fully Connected Layer + Leaky ReLU (alpha=0.2)"""
 
     def __init__(self, inChannels, outChannels, lrMultiplier=1.):
-        super(EqualLinear, self).__init__()
+        super(LinearLayer, self).__init__()
 
         self._lrMultiplier = lrMultiplier
 
@@ -65,130 +86,90 @@ class EqualLinear(nn.Module):
         # :: times sqrt(2/fan_in)
         self._weightMultiplier = np.sqrt(1. / inChannels)
 
-    def forward(self, inTensor):
+    def forward(self, latent):
         w = self.weight * self._weightMultiplier * self._lrMultiplier
         b = self.bias.unsqueeze(dim=0) * self._lrMultiplier
 
-        outTensor = F.linear(inTensor, weight=w)
-        outTensor = F.leaky_relu(outTensor.add_(b), negative_slope=0.2) * np.sqrt(2)
+        latent = F.linear(latent, weight=w)
+        latent = F.leaky_relu(latent.add_(b), negative_slope=0.2) * np.sqrt(2)
 
-        return outTensor
+        return latent
 
 
 class SynthesisNetwork(nn.Module):
+    """ Synthesis Network """
     def __init__(self, latentDim, targetResolution):
         super(SynthesisNetwork, self).__init__()
 
-        resolutionToChannels = {
-            4: 512,
-            8: 512,
-            16: 512,
-            32: 512,
-            64: 256,
-            128: 128,
-            256: 64,
-            512: 32,
-            1024: 16
-        }
+        self._resolutionGroup = [x for x in RES_TO_CHANNELS.keys() if x <= targetResolution]
 
-        inputResolution = 4
-        self.input = ConstantInput(resolutionToChannels[inputResolution], inputResolution)
+        inputResolution = self._resolutionGroup[0]
+        inChannel = RES_TO_CHANNELS[inputResolution]
+        initNormalDist = torch.randn((1, inChannel, inputResolution, inputResolution))
+        self.content = nn.Parameter(initNormalDist)
 
-        self.convList = nn.ModuleList()
-        self.toRgbList = nn.ModuleList()
-        inChannel = resolutionToChannels[inputResolution]
-        for resolution, outChannel in resolutionToChannels.items():
-            if resolution == 4:
-                self.convList.append(StyleBlock(latentDim, inChannel, outChannel, 3))
-            else:
-                self.convList.append(StyleBlock(latentDim, inChannel, outChannel, 3, doUpsample=True))
-                self.convList.append(StyleBlock(latentDim, outChannel, outChannel, 3))
-            self.toRgbList.append(ToRgb(latentDim, outChannel))
+        for res in self._resolutionGroup:
+            outChannel = RES_TO_CHANNELS[res]
+
+            styleBlocks = nn.ModuleList()
+            if res != inputResolution:
+                styleBlocks.append(SynthesisBlock(latentDim, inChannel, outChannel, 3, doUpsample=True))
+            styleBlocks.append(SynthesisBlock(latentDim, outChannel, outChannel, 3))
+            setattr(self, f'{res}.blocks', styleBlocks)
+
+            toRgbBlock = ToRgb(latentDim, outChannel)
+            setattr(self, f'{res}.toRgb', toRgbBlock)
+
             inChannel = outChannel
-            if resolution == targetResolution: break
 
-        self._latentNum = len(self.convList) + 1
+        self._numLatent = len(self._resolutionGroup) * 2
 
     def forward(self, latent):
-        latent = latent.unsqueeze(1).repeat(1, self._latentNum, 1)
+        latent = latent.unsqueeze(1).repeat(1, self._numLatent, 1)
 
         batchSize = latent.size(0)
-        outTensor = self.input(batchSize)
-        outTensor = self.convList[0](outTensor, latent[:, 0, :])
-        imgTensor = self.toRgbList[0](None, outTensor, latent[:, 1, :])
+        content = self.content.repeat(batchSize, 1, 1, 1)
 
-        i = 1
-        for (conv1, conv2, toRgb) in zip(self.convList[1::2], self.convList[2::2], self.toRgbList[1:]):
-            outTensor = conv1(outTensor, latent[:, i, :])
-            outTensor = conv2(outTensor, latent[:, i + 1, :])
-            imgTensor = toRgb(imgTensor, outTensor, latent[:, i + 2, :])
+        image = None
+        latentIdx = 0
+        for res in self._resolutionGroup:
+            blocks = getattr(self, f'{res}.blocks')
+            for block in blocks:
+                content = block(content, latent[:, latentIdx, :])
+                latentIdx += 1
 
-            i += 2
+            rgbBlock = getattr(self, f'{res}.toRgb')
+            image = rgbBlock(image, content, latent[:, latentIdx, :])
 
-        return imgTensor
-
-
-class ConstantInput(nn.Module):
-    def __init__(self, channel=512, size=4):
-        super().__init__()
-
-        initNormalDist = torch.randn((1, channel, size, size))
-        self.input = nn.Parameter(initNormalDist)
-
-    def forward(self, batchSize):
-        x = self.input.repeat(batchSize, 1, 1, 1)
-
-        return x
+        return image
 
 
-class StyleBlock(nn.Module):
+class SynthesisBlock(nn.Module):
     """ Network block where ONE style is active """
 
     def __init__(self, latentDim, inChannels, outChannels, kernelSize, doUpsample=False):
-        super(StyleBlock, self).__init__()
+        super(SynthesisBlock, self).__init__()
 
         self.conv = ConvLayer(latentDim, inChannels, outChannels, kernelSize, doUpsample=doUpsample, doDemod=True)
         initZeros = torch.zeros((1, outChannels, 1, 1))
         self.bias = nn.Parameter(initZeros)
 
-        self.noise = NoiseInjection()
+        initZero = torch.zeros([])
+        self.noiseWeight = nn.Parameter(initZero)
 
-    def forward(self, inTensor, latent):
+    def forward(self, content, latent):
         # Fused Convolution
-        outTensor = self.conv(inTensor, latent)
+        content = self.conv(content, latent)
 
-        # NoiseInjection -> AddBias -> Activation
-        outTensor = self.noise(outTensor)
-        outTensor = F.leaky_relu(outTensor.add_(self.bias), negative_slope=0.2) * np.sqrt(2)
+        # NoiseInjection
+        batchSize, _, cHeight, cWidth = content.shape
+        noise = torch.randn((batchSize, 1, cHeight, cWidth), device=content.device)
+        content = content.add_(self.noiseWeight * noise)
 
-        return outTensor
+        # AddBias -> Activation
+        content = F.leaky_relu(content.add_(self.bias), negative_slope=0.2) * np.sqrt(2)
 
-
-class AffineNetwork(nn.Module):
-    """ Affine Transformation Network: W (intermediate latent space) -> s (style) """
-
-    def __init__(self, latentDim, styleDim):
-        super(AffineNetwork, self).__init__()
-
-        self.affine = EqualLinear(latentDim, styleDim)
-        self.affine.bias.data.fill_(1)  # init bias to 1 instead of 0
-
-    def forward(self, latent):
-        return self.affine(latent)
-
-
-class NoiseInjection(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-        initZeros = torch.zeros([])
-        self.weight = nn.Parameter(initZeros)
-
-    def forward(self, inTensor):
-        batchSize, _, imgHeight, imgWidth = inTensor.shape
-        noise = torch.randn(batchSize, 1, imgHeight, imgWidth, device=inTensor.device)
-
-        return inTensor.add_(self.weight * noise)
+        return content
 
 
 class ConvLayer(nn.Module):
@@ -202,7 +183,8 @@ class ConvLayer(nn.Module):
         self._doDownsample = doDownsample
         self._doDemod = doDemod
 
-        self.affine = AffineNetwork(latentDim, inChannels)
+        self.affine = LinearLayer(latentDim, inChannels)
+        self.affine.bias.data.fill_(1)
 
         h, w = [kernelSize] * 2
         initNormalDist = torch.randn((outChannels, inChannels, h, w))
@@ -259,7 +241,7 @@ class ToRgb(nn.Module):
     def __init__(self, latentDim, inChannels):
         super(ToRgb, self).__init__()
 
-        self.toRgb = ConvLayer(latentDim, inChannels, outChannels=3, kernelSize=1, doDemod=False)
+        self.conv = ConvLayer(latentDim, inChannels, outChannels=3, kernelSize=1, doDemod=False)
         initZeros = torch.zeros((1, 3, 1, 1))
         self.bias = nn.Parameter(initZeros)
 
@@ -267,7 +249,7 @@ class ToRgb(nn.Module):
         self._multiplier = np.sqrt(1. / fanIn)
 
     def forward(self, prevTensor, inTensor, latent):
-        outTensor = self.toRgb(inTensor, latent, styleMultiplier=self._multiplier).add_(self.bias)
+        outTensor = self.conv(inTensor, latent, styleMultiplier=self._multiplier).add_(self.bias)
 
         if prevTensor is not None:
             prevTensor = F.interpolate(prevTensor, None, 2, 'bilinear')
