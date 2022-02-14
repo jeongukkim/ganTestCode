@@ -47,7 +47,7 @@ def testSynthesisNetwork(srcG, dstG):
     dstG.load_state_dict(myDict, strict=False)
 
     # print(srcG.state_dict()["synthesis.b4.const"])
-    # print(dstG.state_dict()["synthesis.input.input"])
+    # print(dstG.state_dict()["synthesis.content"])
     # print(srcG.state_dict()["synthesis.b4.conv1.weight"].shape)
     # print(dstG.state_dict()["synthesis.convList.0.conv.weight"].shape)
     # print(srcG.state_dict()["synthesis.b4.conv1.bias"])
@@ -60,12 +60,13 @@ def testSynthesisNetwork(srcG, dstG):
     # print(dstG.state_dict()["synthesis.toRgbList.0.bias"])
 
     latent = torch.randn([1, 512]).cuda()
+
     c = None
 
     intermediateLatent = srcG.mapping(latent, c)
+
     imgSrc = srcG.synthesis(intermediateLatent)
     imgDst = dstG.synthesis(intermediateLatent.narrow(dim=1, start=0, length=1).squeeze(dim=1))
-    print(imgDst.abs().max())
 
     # imgSrc = srcG(latent, c)
     # imgDst = dstG(latent)
@@ -98,8 +99,8 @@ def loadConvBlocks(srcG, myDict):
 
 
 def loadAffineNetwork(srcG, myDict):
-    myDict["synthesis.4.blocks.1.conv.affine.weight"] = srcG.state_dict()["synthesis.b4.conv1.affine.weight"]
-    myDict["synthesis.4.blocks.1.conv.affine.bias"] = srcG.state_dict()["synthesis.b4.conv1.affine.bias"]
+    myDict["synthesis.4.blocks.0.conv.affine.weight"] = srcG.state_dict()["synthesis.b4.conv1.affine.weight"]
+    myDict["synthesis.4.blocks.0.conv.affine.bias"] = srcG.state_dict()["synthesis.b4.conv1.affine.bias"]
 
     for i in range(3, 9):
         res = int(2 ** i)
@@ -152,6 +153,7 @@ if __name__ == "__main__":
 
     testMappingNetwork(G_ema, G)
     testSynthesisNetwork(G_ema, G)
+
 
 
 

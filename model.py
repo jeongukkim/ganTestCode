@@ -63,7 +63,8 @@ class MappingNetwork(nn.Module):
         return self._numLayers
 
     def forward(self, latent):
-        latent = latent * latent.square().mean(dim=1, keepdim=True).add_(EPSILON).rsqrt()
+        # latent = latent * latent.square().mean(dim=1, keepdim=True).add_(EPSILON).rsqrt()
+        latent = latent * (latent.square().mean(dim=1, keepdim=True)+EPSILON).rsqrt()
         intermediateLatent = self.fcs(latent)
 
         return intermediateLatent
@@ -86,12 +87,15 @@ class LinearLayer(nn.Module):
         # :: times sqrt(2/fan_in)
         self._weightMultiplier = np.sqrt(1. / inChannels)
 
-    def forward(self, latent):
+    def forward(self, latent, lrelu=True):
         w = self.weight * self._weightMultiplier * self._lrMultiplier
         b = self.bias.unsqueeze(dim=0) * self._lrMultiplier
 
         latent = F.linear(latent, weight=w)
-        latent = F.leaky_relu(latent.add_(b), negative_slope=0.2) * np.sqrt(2)
+        if lrelu:
+            latent = F.leaky_relu(latent.add_(b), negative_slope=0.2) * np.sqrt(2)
+        else:
+            latent.add_(b)
 
         return latent
 
@@ -193,25 +197,36 @@ class ConvLayer(nn.Module):
         # padding
         self._padding = kernelSize // 2
 
+        # blur filter
+        self._filter = [1, 3, 3, 1]
+
         # Equalized Learning Rate
         # :: times sqrt(2/fan_in)
         fanIn = inChannels * h * w
         self._weightMultiplier = np.sqrt(1. / fanIn)
 
+    def get_filter(self):
+        filter = torch.tensor(self._filter)
+        filter = filter.outer(filter)
+        filter = filter / filter.sum()
+
+        return filter
+
     def forward(self, inTensor, latent, styleMultiplier=1.):
         # Bilinear filtering if needed
-        if self._doUpsample:
-            inTensor = F.interpolate(inTensor, None, 2, 'bilinear')
-        if self._doDownsample:
-            inTensor = F.interpolate(inTensor, None, 0.5, 'bilinear')
+        # if self._doUpsample:
+        #     inTensor = F.interpolate(inTensor, None, 2, 'bilinear')
+        # if self._doDownsample:
+        #     inTensor = F.interpolate(inTensor, None, 0.5, 'bilinear')
 
         batchSize, inChannels, imgHeight, imgWidth = inTensor.shape
 
         # Affine transformation
-        style = self.affine(latent) * styleMultiplier
+        style = self.affine(latent, lrelu=False) * styleMultiplier
 
         # Equalized LR
-        weight = self.weight * self._weightMultiplier
+        # weight = self.weight * self._weightMultiplier
+        weight = self.weight
 
         # Reshape to [batchSize, outChannels, inChannels, kernelSize, kernelSize]
         style = style.reshape(batchSize, 1, -1, 1, 1)
@@ -222,14 +237,34 @@ class ConvLayer(nn.Module):
 
         # Demodulation if needed
         if self._doDemod:
-            norm = weight.square().sum(dim=[2, 3, 4], keepdim=True).add_(1e-8).rsqrt()
-            weight *= norm
+            # norm = weight.square().sum(dim=[2, 3, 4], keepdim=True).add_(1e-8).rsqrt()
+            norm = (weight.square().sum(dim=[2, 3, 4], keepdim=True)+1e-8).rsqrt()
+            weight = weight * norm
 
         # Reshape and Group Convolution
         inTensor = inTensor.reshape(1, -1, imgHeight, imgWidth)
-        weight = weight.reshape(-1, *weight.shape[2:])
+        if self._doUpsample:
+            weight = weight.transpose(1, 2)
+            weight = weight.reshape(-1, *weight.shape[2:])
 
-        outTensor = F.conv2d(inTensor, weight=weight, padding=self._padding, groups=batchSize)
+            outTensor = F.conv_transpose2d(inTensor, weight=weight, stride=2, padding=(0, 0), groups=batchSize)
+
+            outTensor = F.pad(outTensor, [1, 1, 1, 1])
+
+            channels = outTensor.size(dim=1)
+
+            blur_filter = self.get_filter()
+            blur_filter *= 4
+            blur_filter = blur_filter[None, None, :, :].repeat(channels, 1, 1, 1)
+            blur_filter = blur_filter.to(outTensor.device)
+
+            outTensor = F.conv2d(outTensor, weight=blur_filter, groups=channels)
+
+        else:
+            weight = weight.reshape(-1, *weight.shape[2:])
+
+            outTensor = F.conv2d(inTensor, weight=weight, padding=self._padding, groups=batchSize)
+
         outTensor = outTensor.reshape(batchSize, -1, *outTensor.shape[2:])
 
         return outTensor
@@ -252,7 +287,21 @@ class ToRgb(nn.Module):
         outTensor = self.conv(inTensor, latent, styleMultiplier=self._multiplier).add_(self.bias)
 
         if prevTensor is not None:
-            prevTensor = F.interpolate(prevTensor, None, 2, 'bilinear')
+            batchSize, inChannel, imageHeight, imageWidth = prevTensor.shape
+            prevTensor = prevTensor.reshape(batchSize, inChannel, imageHeight, 1, imageWidth, 1)
+            prevTensor = F.pad(prevTensor, [0, 1, 0, 0, 0, 1])
+            prevTensor = prevTensor.reshape(batchSize, inChannel, imageHeight * 2, imageWidth * 2)
+            prevTensor = F.pad(prevTensor, [2, 1, 2, 1])
+
+            filter = torch.tensor([1,3,3,1])
+            filter = filter.outer(filter)
+            filter = filter / filter.sum()
+            filter *= 4
+            filter = filter[None, None, :, :].repeat(inChannel, 1, 1, 1)
+            filter = filter.to(outTensor.device)
+
+            prevTensor = F.conv2d(prevTensor, weight=filter, groups=inChannel)
+
             outTensor += prevTensor
 
         return outTensor
