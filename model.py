@@ -199,8 +199,11 @@ class ConvLayer(nn.Module):
         self._doDownsample = doDownsample
         self._doDemod = doDemod
 
-        self.affine = LinearLayer(latentDim, inChannels, doActivation=False)
-        self.affine.bias.data.fill_(1)
+        if latentDim is not None:
+            self.affine = LinearLayer(latentDim, inChannels, doActivation=False)
+            self.affine.bias.data.fill_(1)
+        else:
+            self.affine = None
 
         kh, kw = [kernelSize] * 2
         initNormalDist = torch.randn((outChannels, inChannels, kh, kw))
@@ -222,6 +225,10 @@ class ConvLayer(nn.Module):
         fanIn = inChannels * kh * kw
         self._weightMultiplier = np.sqrt(1. / fanIn)
 
+    @property
+    def isModulationOff(self):
+        return self.affine is None
+
     def forward(self, inTensor, latent):
         weight = self._normalizeWeight(latent)
         outTensor = self._convMain(inTensor, weight)
@@ -229,6 +236,19 @@ class ConvLayer(nn.Module):
         return outTensor
 
     def _normalizeWeight(self, latent):
+        if self.isModulationOff:
+            weight = self._equalizeLR()
+        else:
+            weight = self._modulate(latent)
+
+        return weight
+
+    def _equalizeLR(self):
+        weight = self.weight * self._weightMultiplier
+
+        return weight
+
+    def _modulate(self, latent):
         styleMultiplier = self._weightMultiplier if not self._doDemod else 1
 
         style = self.affine(latent) * styleMultiplier
@@ -249,25 +269,28 @@ class ConvLayer(nn.Module):
         return weight
 
     def _convMain(self, inTensor, weight):
-        batchSize, _, imgHeight, imgWidth = inTensor.shape
-
-        # Group Convolution sees one sample with N groups
-        inTensor = inTensor.reshape(1, -1, imgHeight, imgWidth)
         if self._doUpsample:
-            outTensor = self._transeposeStridedConvThenBlur(inTensor, weight, numGroups=batchSize)
+            convFunc = self._transeposeStridedConvThenBlur
+        elif self._doDownsample:
+            convFunc = self._blurThenStridedConv
+        elif self.isModulationOff:
+            convFunc = self._plainConv
         else:
-            outTensor = self._plainConv(inTensor, weight, numGroups=batchSize)
+            convFunc = self._groupConv
 
-        outTensor = outTensor.reshape(batchSize, -1, *outTensor.shape[2:])
+        outTensor = convFunc(inTensor, weight)
 
         return outTensor
 
-    def _transeposeStridedConvThenBlur(self, inTensor, weight, numGroups):
+    def _transeposeStridedConvThenBlur(self, inTensor, weight):
+        batchSize, _, imgHeight, imgWidth = inTensor.shape
+
         # transepose strided group convolution
+        inTensor = inTensor.reshape(1, -1, imgHeight, imgWidth)
         weight = weight.transpose(1, 2)
         weight = weight.reshape(-1, *weight.shape[2:])
 
-        outTensor = F.conv_transpose2d(inTensor, weight=weight, stride=2, padding=(0, 0), groups=numGroups)
+        outTensor = F.conv_transpose2d(inTensor, weight=weight, stride=2, padding=(0, 0), groups=batchSize)
 
         # Blur
         outTensor = F.pad(outTensor, [1, 1, 1, 1])
@@ -281,12 +304,44 @@ class ConvLayer(nn.Module):
 
         outTensor = F.conv2d(outTensor, weight=blurFilter, groups=numChannels)
 
+        # Reshape to [batchSize, outChannels, imgHeight, imgWidth]
+        outTensor = outTensor.reshape(batchSize, -1, *outTensor.shape[2:])
+
         return outTensor
 
-    def _plainConv(self, inTensor, weight, numGroups):
+    def _blurThenStridedConv(self, inTensor, weight):
+        # Blur
+        outTensor = F.pad(inTensor, [2, 2, 2, 2])
+
+        numChannels = outTensor.size(dim=1)
+
+        blurFilter = self.filter
+        blurFilter = blurFilter[None, None, :, :].repeat(numChannels, 1, 1, 1)
+        blurFilter = blurFilter.to(outTensor.device)
+
+        outTensor = F.conv2d(outTensor, weight=blurFilter, groups=numChannels)
+
+        # strided convolution
+        outTensor = F.conv2d(outTensor, weight=weight, stride=2)
+
+        return outTensor
+
+    def _plainConv(self, inTensor, weight):
+        outTensor = F.conv2d(inTensor, weight=weight, padding=self._padding)
+
+        return outTensor
+
+    def _groupConv(self, inTensor, weight):
+        batchSize, _, imgHeight, imgWidth = inTensor.shape
+
+        # Group Convolution sees one sample with N groups
+        inTensor = inTensor.reshape(1, -1, imgHeight, imgWidth)
         weight = weight.reshape(-1, *weight.shape[2:])
 
-        outTensor = F.conv2d(inTensor, weight=weight, padding=self._padding, groups=numGroups)
+        outTensor = F.conv2d(inTensor, weight=weight, padding=self._padding, groups=batchSize)
+
+        # Reshape to [batchSize, outChannels, imgHeight, imgWidth]
+        outTensor = outTensor.reshape(batchSize, -1, *outTensor.shape[2:])
 
         return outTensor
 
@@ -335,3 +390,36 @@ class ToRgb(nn.Module):
             outputImg += prevImg
 
         return outputImg
+
+
+class Discriminator(nn.Module):
+    def __init__(self, targetResolution):
+        super(Discriminator, self).__init__()
+
+        pass
+
+
+class DiscriminatorBlock(nn.Module):
+    """ Network block where two consecutive conv layers applied """
+
+    def __init__(self, inChannels, outChannels, kernelSize):
+        super(DiscriminatorBlock, self).__init__()
+
+        self.conv0 = ConvLayer(None, inChannels, outChannels, kernelSize)
+        initZeros = torch.zeros((1, outChannels, 1, 1))
+        self.bias0 = nn.Parameter(initZeros)
+
+        self.conv1 = ConvLayer(None, inChannels, outChannels, kernelSize, doDownsample=True)
+        initZeros = torch.zeros((1, outChannels, 1, 1))
+        self.bias1 = nn.Parameter(initZeros)
+
+    def forward(self, inTensor):
+        # conv0 layer
+        outTensor = self.conv0(inTensor, None)
+        outTensor = F.leaky_relu(outTensor.add_(self.bias0), negative_slope=0.2) * np.sqrt(2)
+
+        # conv1 layer
+        outTensor = self.conv1(outTensor, None)
+        outTensor = F.leaky_relu(outTensor.add_(self.bias1), negative_slope=0.2) * np.sqrt(2)
+
+        return outTensor
