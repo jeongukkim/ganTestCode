@@ -272,7 +272,8 @@ class ConvLayer(nn.Module):
         if self._doUpsample:
             convFunc = self._transeposeStridedConvThenBlur
         elif self._doDownsample:
-            convFunc = self._blurThenStridedConv
+            convFunc = self._downsampleThenConv if weight.shape[-1] == 1 \
+                else self._blurThenStridedConv
         elif self.isModulationOff:
             convFunc = self._plainConv
         else:
@@ -323,6 +324,24 @@ class ConvLayer(nn.Module):
 
         # strided convolution
         outTensor = F.conv2d(outTensor, weight=weight, stride=2)
+
+        return outTensor
+
+    def _downsampleThenConv(self, inTensor, weight):
+        # downsample
+        outTensor = F.pad(inTensor, [1, 1, 1, 1])
+
+        numChannels = outTensor.size(dim=1)
+
+        blurFilter = self.filter
+        blurFilter = blurFilter[None, None, :, :].repeat(numChannels, 1, 1, 1)
+        blurFilter = blurFilter.to(outTensor.device)
+
+        outTensor = F.conv2d(outTensor, weight=blurFilter, groups=numChannels)
+        outTensor = outTensor[:, :, ::2, ::2]
+
+        # convolution
+        outTensor = F.conv2d(outTensor, weight=weight)
 
         return outTensor
 
@@ -393,10 +412,72 @@ class ToRgb(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, targetResolution):
+    def __init__(self, targetResolution, minibatchGroup=1):
         super(Discriminator, self).__init__()
 
-        pass
+        self._minibatchGroup = minibatchGroup
+
+        # list ranging from targetResolution to 8
+        self._resolutionGroup = list(reversed([x for x in RES_TO_CHANNELS.keys() if x <= targetResolution]))[:-1]
+
+        inChannel = RES_TO_CHANNELS[targetResolution]
+        initZeros = torch.zeros((1, inChannel, 1, 1))
+        self.frgbBias = nn.Parameter(initZeros)
+        self.fromRgb = ConvLayer(None, 3, inChannel, 1)
+
+        self.downsamples = nn.ModuleList()
+        self.blocks = nn.ModuleList()
+        for resolution in self._resolutionGroup:
+            outChannel = RES_TO_CHANNELS[resolution // 2]
+            self.downsamples.append(ConvLayer(None, inChannel, outChannel, kernelSize=1, doDownsample=True))
+            self.blocks.append(DiscriminatorBlock(inChannel, outChannel, kernelSize=3))
+            inChannel = outChannel
+
+        outChannel = RES_TO_CHANNELS[4]
+        self.finalConv = ConvLayer(None, inChannel + self._minibatchGroup, outChannel, kernelSize=3)
+        initZeros = torch.zeros((1, outChannel, 1, 1))
+        self.finalConvBias = nn.Parameter(initZeros)
+
+        self.finalLinear = nn.Sequential(
+            LinearLayer(outChannel * 4 * 4, outChannel),
+            LinearLayer(outChannel, 1, doActivation=False)
+        )
+
+    def forward(self, image):
+        # from Rgb
+        inTensor = self.fromRgb(image)
+        inTensor = F.leaky_relu(inTensor.add_(self.frgbBias), negative_slope=0.2) * np.sqrt(2)
+
+        # residual
+        for downsample, block in zip(self.downsamples, self.blocks):
+            downTensor = downsample(inTensor, None)
+            outTensor = block(inTensor)
+
+            # adding
+            inTensor = (downTensor + outTensor) / np.sqrt(2)
+
+        # minibatch std
+        outTensor = self._minibatchStd(inTensor)
+
+        # final conv -> final fully connected
+        outTensor = self.finalConv(outTensor)
+        outTensor = F.leaky_relu(outTensor.add_(self.finalConvBias), negative_slope=0.2) * np.sqrt(2)
+
+        out = self.finalLinear(outTensor.flatten(start_dim=1))
+
+        return out
+
+    def _minibatchStd(self, inTensor):
+        batchSize, inChannel, imageHeight, imageWidth = inTensor.shape
+
+        stddev = inTensor.view(self._minibatchGroup, -1, 1, inChannel, imageHeight, imageWidth)
+        stddev = torch.sqrt(stddev.var(0, unbiased=False) + EPSILON)
+        stddev = stddev.mean([2, 3, 4], keepdims=True).squeeze(2)
+        stddev = stddev.repeat(self._minibatchGroup, 1, imageHeight, imageWidth)
+
+        outTensor = torch.cat([inTensor, stddev], dim=1)
+
+        return outTensor
 
 
 class DiscriminatorBlock(nn.Module):
@@ -405,8 +486,8 @@ class DiscriminatorBlock(nn.Module):
     def __init__(self, inChannels, outChannels, kernelSize):
         super(DiscriminatorBlock, self).__init__()
 
-        self.conv0 = ConvLayer(None, inChannels, outChannels, kernelSize)
-        initZeros = torch.zeros((1, outChannels, 1, 1))
+        self.conv0 = ConvLayer(None, inChannels, inChannels, kernelSize)
+        initZeros = torch.zeros((1, inChannels, 1, 1))
         self.bias0 = nn.Parameter(initZeros)
 
         self.conv1 = ConvLayer(None, inChannels, outChannels, kernelSize, doDownsample=True)
