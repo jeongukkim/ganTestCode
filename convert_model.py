@@ -87,45 +87,45 @@ def loadConstInput(srcG, myDict):
 
 
 def loadConvBlocks(srcG, myDict):
-    myDict["synthesis.4.blocks.0.conv.weight"] = srcG.state_dict()["synthesis.b4.conv1.weight"]
-    myDict["synthesis.4.blocks.0.bias"] = srcG.state_dict()["synthesis.b4.conv1.bias"].reshape(1, -1, 1, 1)
+    myDict["synthesis.synthesis_blocks.0.style_block_1.weight"] = srcG.state_dict()["synthesis.b4.conv1.weight"]
+    myDict["synthesis.synthesis_blocks.0.style_block_1_bias"] = srcG.state_dict()["synthesis.b4.conv1.bias"].reshape(1, -1, 1, 1)
 
     for i in range(3, 9):
         res = int(2 ** i)
-        myDict[f"synthesis.{res}.blocks.0.conv.weight"] = srcG.state_dict()[f"synthesis.b{res}.conv0.weight"]
-        myDict[f"synthesis.{res}.blocks.0.bias"] = srcG.state_dict()[f"synthesis.b{res}.conv0.bias"].reshape(1, -1, 1, 1)
-        myDict[f"synthesis.{res}.blocks.1.conv.weight"] = srcG.state_dict()[f"synthesis.b{res}.conv1.weight"]
-        myDict[f"synthesis.{res}.blocks.1.bias"] = srcG.state_dict()[f"synthesis.b{res}.conv1.bias"].reshape(1, -1, 1, 1)
+        myDict[f"synthesis.synthesis_blocks.{i-2}.style_block_0.weight"] = srcG.state_dict()[f"synthesis.b{res}.conv0.weight"]
+        myDict[f"synthesis.synthesis_blocks.{i-2}.style_block_0_bias"] = srcG.state_dict()[f"synthesis.b{res}.conv0.bias"].reshape(1, -1, 1, 1)
+        myDict[f"synthesis.synthesis_blocks.{i-2}.style_block_1.weight"] = srcG.state_dict()[f"synthesis.b{res}.conv1.weight"]
+        myDict[f"synthesis.synthesis_blocks.{i-2}.style_block_1_bias"] = srcG.state_dict()[f"synthesis.b{res}.conv1.bias"].reshape(1, -1, 1, 1)
 
 
 def loadAffineNetwork(srcG, myDict):
-    myDict["synthesis.4.blocks.0.conv.affine.weight"] = srcG.state_dict()["synthesis.b4.conv1.affine.weight"]
-    myDict["synthesis.4.blocks.0.conv.affine.bias"] = srcG.state_dict()["synthesis.b4.conv1.affine.bias"]
+    myDict["synthesis.synthesis_blocks.0.style_block_1.affine.weight"] = srcG.state_dict()["synthesis.b4.conv1.affine.weight"]
+    myDict["synthesis.synthesis_blocks.0.style_block_1.affine.bias"] = srcG.state_dict()["synthesis.b4.conv1.affine.bias"]
 
     for i in range(3, 9):
         res = int(2 ** i)
-        myDict[f"synthesis.{res}.blocks.0.conv.affine.weight"] = srcG.state_dict()[f"synthesis.b{res}.conv0.affine.weight"]
-        myDict[f"synthesis.{res}.blocks.0.conv.affine.bias"] = srcG.state_dict()[f"synthesis.b{res}.conv0.affine.bias"]
-        myDict[f"synthesis.{res}.blocks.1.conv.affine.weight"] = srcG.state_dict()[f"synthesis.b{res}.conv1.affine.weight"]
-        myDict[f"synthesis.{res}.blocks.1.conv.affine.bias"] = srcG.state_dict()[f"synthesis.b{res}.conv1.affine.bias"]
+        myDict[f"synthesis.synthesis_blocks.{i-2}.style_block_0.affine.weight"] = srcG.state_dict()[f"synthesis.b{res}.conv0.affine.weight"]
+        myDict[f"synthesis.synthesis_blocks.{i-2}.style_block_0.affine.bias"] = srcG.state_dict()[f"synthesis.b{res}.conv0.affine.bias"]
+        myDict[f"synthesis.synthesis_blocks.{i-2}.style_block_1.affine.weight"] = srcG.state_dict()[f"synthesis.b{res}.conv1.affine.weight"]
+        myDict[f"synthesis.synthesis_blocks.{i-2}.style_block_1.affine.bias"] = srcG.state_dict()[f"synthesis.b{res}.conv1.affine.bias"]
 
 
 def loadNoiseInjection(srcG, myDict):
-    myDict["synthesis.4.blocks.0.noiseWeight"] = srcG.state_dict()["synthesis.b4.conv1.noise_strength"]
+    myDict["synthesis.synthesis_blocks.0.noise_weight_1"] = srcG.state_dict()["synthesis.b4.conv1.noise_strength"]
 
     for i in range(3, 9):
         res = int(2 ** i)
-        myDict[f"synthesis.{res}.blocks.0.noiseWeight"] = srcG.state_dict()[f"synthesis.b{res}.conv0.noise_strength"]
-        myDict[f"synthesis.{res}.blocks.1.noiseWeight"] = srcG.state_dict()[f"synthesis.b{res}.conv1.noise_strength"]
+        myDict[f"synthesis.synthesis_blocks.{i-2}.noise_weight_0"] = srcG.state_dict()[f"synthesis.b{res}.conv0.noise_strength"]
+        myDict[f"synthesis.synthesis_blocks.{i-2}.noise_weight_1"] = srcG.state_dict()[f"synthesis.b{res}.conv1.noise_strength"]
 
 
 def loadToRgb(srcG, myDict):
     for i in range(2, 9):
         res = int(2 ** i)
-        myDict[f"synthesis.{res}.toRgb.conv.weight"] = srcG.state_dict()[f"synthesis.b{res}.torgb.weight"]
-        myDict[f"synthesis.{res}.toRgb.bias"] = srcG.state_dict()[f"synthesis.b{res}.torgb.bias"].reshape(1, -1, 1, 1)
-        myDict[f"synthesis.{res}.toRgb.conv.affine.weight"] = srcG.state_dict()[f"synthesis.b{res}.torgb.affine.weight"]
-        myDict[f"synthesis.{res}.toRgb.conv.affine.bias"] = srcG.state_dict()[f"synthesis.b{res}.torgb.affine.bias"]
+        myDict[f"synthesis.output_skips.{i-2}.torgb.weight"] = srcG.state_dict()[f"synthesis.b{res}.torgb.weight"]
+        myDict[f"synthesis.output_skips.{i-2}.bias"] = srcG.state_dict()[f"synthesis.b{res}.torgb.bias"].reshape(1, -1, 1, 1)
+        myDict[f"synthesis.output_skips.{i-2}.torgb.affine.weight"] = srcG.state_dict()[f"synthesis.b{res}.torgb.affine.weight"]
+        myDict[f"synthesis.output_skips.{i-2}.torgb.affine.bias"] = srcG.state_dict()[f"synthesis.b{res}.torgb.affine.bias"]
 
 
 def showImg(genOutput):
@@ -144,16 +144,15 @@ if __name__ == "__main__":
     sys.path.insert(0, "C:\\Projects\\stylegan2-ada-pytorch-main\\")
 
     with open('C:/Projects/stylegan2-ada-pytorch-main/ckpt/ffhq_256.pkl', 'rb') as f:
-        G_ema = pickle.load(f)['G_ema'].cuda()
+        files = pickle.load(f)
+    loadG = files['G_ema'].cuda()
+    loadD = files['D'].cuda()
 
-    G = Generator(targetResolution=256).cuda()
+    G = Generator(target_resolution=256).cuda()
 
-    print(G_ema.state_dict().keys())
+    print(loadG.state_dict().keys())
     print(G.state_dict().keys())
+    print(loadD.state_dict().keys())
 
-    testMappingNetwork(G_ema, G)
-    testSynthesisNetwork(G_ema, G)
-
-
-
-
+    testMappingNetwork(loadG, G)
+    testSynthesisNetwork(loadG, G)

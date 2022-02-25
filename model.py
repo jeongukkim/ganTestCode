@@ -29,80 +29,79 @@ SIZE_TO_BLUR_KERNEL = {
 
 
 class Generator(nn.Module):
-    def __init__(self, targetResolution, latentDim=512, numFCLayers=8):
+    def __init__(self, target_resolution, latent_dim=512, num_fc_layers=8):
         super(Generator, self).__init__()
 
-        self._latentDim = latentDim
-        self._targetResolution = targetResolution
+        self._latent_dim = latent_dim
+        self._target_resolution = target_resolution
 
-        self.mapping = MappingNetwork(latentDim=latentDim, numLayers=numFCLayers)
-        self.synthesis = SynthesisNetwork(latentDim=latentDim, targetResolution=targetResolution)
+        self.mapping = MappingNetwork(latent_dim=latent_dim, num_layers=num_fc_layers)
+        self.synthesis = SynthesisNetwork(latent_dim=latent_dim, target_resolution=target_resolution)
 
     @property
     def image_resolution(self):
-        return self._targetResolution
+        return self._target_resolution
 
     @property
     def latent_dimension(self):
-        return self._latentDim
+        return self._latent_dim
 
     def forward(self, latent):
-        intermediateLatent = self.mapping(latent)
-        outputImage = self.synthesis(intermediateLatent)
+        intermediate_latent = self.mapping(latent)
+        output_image = self.synthesis(intermediate_latent)
 
-        return outputImage
+        return output_image
 
 
 class MappingNetwork(nn.Module):
     """ Mapping Network: Z (latent space) -> W (intermediate latent space) """
 
-    def __init__(self, latentDim=512, numLayers=8):
+    def __init__(self, latent_dim=512, num_layers=8):
         super(MappingNetwork, self).__init__()
 
-        self._numLayers = numLayers
+        self._num_layers = num_layers
 
-        fullyConnectedBlocks = []
-        for _ in range(numLayers):
-            fullyConnectedBlocks.append(LinearLayer(latentDim, latentDim, lrMultiplier=0.01))
+        fully_connected_blocks = []
+        for _ in range(num_layers):
+            fully_connected_blocks.append(LinearLayer(latent_dim, latent_dim, lr_multiplier=0.01))
 
-        self.fcs = nn.Sequential(*fullyConnectedBlocks)
+        self.fcs = nn.Sequential(*fully_connected_blocks)
 
     @property
     def num_fc_layers(self):
-        return self._numLayers
+        return self._num_layers
 
     def forward(self, latent):
         latent = latent * latent.square().mean(dim=1, keepdim=True).add_(EPSILON).rsqrt()
-        intermediateLatent = self.fcs(latent)
+        intermediate_latent = self.fcs(latent)
 
-        return intermediateLatent
+        return intermediate_latent
 
 
 class LinearLayer(nn.Module):
     """ Fully Connected Layer (+ Leaky ReLU with the negative slope of 0.2)"""
 
-    def __init__(self, inChannels, outChannels, lrMultiplier=1., doActivation=True):
+    def __init__(self, in_channels, out_channels, lr_multiplier=1., do_activation=True):
         super(LinearLayer, self).__init__()
 
-        self._doActivation = doActivation
-        self._lrMultiplier = lrMultiplier
+        self._do_activation = do_activation
+        self._lr_multiplier = lr_multiplier
 
-        initNormalDist = torch.randn((outChannels, inChannels)) / lrMultiplier
-        initZeros = torch.zeros((outChannels))
-        self.weight = nn.Parameter(initNormalDist)
-        self.bias = nn.Parameter(initZeros)
+        init_weight = torch.randn((out_channels, in_channels)) / lr_multiplier
+        self.weight = nn.Parameter(init_weight)
+        self.bias = nn.Parameter(torch.zeros((out_channels)))
 
         # Equalized Learning Rate
         # :: times sqrt(2/fan_in) for ReLU-type activation
-        self._weightMultiplier = np.sqrt(1. / inChannels)
+        self._weight_multiplier = np.sqrt(1. / in_channels)
 
     def forward(self, latent):
-        w = self.weight * self._weightMultiplier * self._lrMultiplier
-        b = self.bias.unsqueeze(dim=0) * self._lrMultiplier
+        w = self.weight * self._weight_multiplier * self._lr_multiplier
+        b = self.bias.unsqueeze(dim=0) * self._lr_multiplier
 
         latent = F.linear(latent, weight=w)
 
-        if self._doActivation:
+        if self._do_activation:
             # to retain expected signal variance, multiply sqrt(2)
             latent = F.leaky_relu(latent.add_(b), negative_slope=0.2) * np.sqrt(2)
         else:
@@ -113,77 +112,157 @@ class LinearLayer(nn.Module):
 
 class SynthesisNetwork(nn.Module):
     """ Synthesis Network """
-    def __init__(self, latentDim, targetResolution):
+    def __init__(self, latent_dim, target_resolution):
         super(SynthesisNetwork, self).__init__()
 
-        self._resolutionGroup = [x for x in RES_TO_CHANNELS.keys() if x <= targetResolution]
+        self._resolution_group = [x for x in RES_TO_CHANNELS.keys() if x <= target_resolution]
 
-        inputResolution = self._resolutionGroup[0]
-        inChannel = RES_TO_CHANNELS[inputResolution]
-        initNormalDist = torch.randn((1, inChannel, inputResolution, inputResolution))
-        self.content = nn.Parameter(initNormalDist)
+        input_resolution = self._resolution_group[0]
+        in_channels = RES_TO_CHANNELS[input_resolution]
+        const_input = torch.randn((1, in_channels, input_resolution, input_resolution))
+        self.content = nn.Parameter(const_input)
 
-        for res in self._resolutionGroup:
-            outChannel = RES_TO_CHANNELS[res]
+        self.synthesis_blocks = nn.ModuleList()
+        self.output_skips = nn.ModuleList()
+        for res in self._resolution_group:
+            out_channels = RES_TO_CHANNELS[res]
 
-            styleBlocks = nn.ModuleList()
-            if res != inputResolution:
-                styleBlocks.append(SynthesisBlock(latentDim, inChannel, outChannel, 3, doUpsample=True))
-            styleBlocks.append(SynthesisBlock(latentDim, outChannel, outChannel, 3))
-            setattr(self, f'{res}.blocks', styleBlocks)
+            if res == input_resolution:
+                self.synthesis_blocks.append(SynthesisBlock(latent_dim, out_channels, out_channels, 3, is_first_block=True))
+            else:
+                self.synthesis_blocks.append(SynthesisBlock(latent_dim, in_channels, out_channels, 3))
 
-            toRgbBlock = ToRgb(latentDim, outChannel)
-            setattr(self, f'{res}.toRgb', toRgbBlock)
+            self.output_skips.append(Skip(latent_dim, out_channels))
 
-            inChannel = outChannel
+            in_channels = out_channels
 
-        self._numLatent = len(self._resolutionGroup) * 2
+        self._num_latent = len(self._resolution_group) * 2
 
     def forward(self, latent):
-        latent = latent.unsqueeze(1).repeat(1, self._numLatent, 1)
+        latent = latent.unsqueeze(1).repeat(1, self._num_latent, 1)
 
-        batchSize = latent.size(0)
-        content = self.content.repeat(batchSize, 1, 1, 1)
+        batch_size = latent.size(0)
+        content = self.content.repeat(batch_size, 1, 1, 1)
 
         image = None
-        latentIdx = 0
-        for res in self._resolutionGroup:
-            blocks = getattr(self, f'{res}.blocks')
-            for block in blocks:
-                content = block(content, latent[:, latentIdx, :])
-                latentIdx += 1
+        latent_idx = 0
+        for synthesis_block, output_skip in zip(self.synthesis_blocks, self.output_skips):
+            content = synthesis_block(content, latent.narrow(dim=1, start=latent_idx, length=2))
+            latent_idx += synthesis_block.num_conv
 
-            rgbBlock = getattr(self, f'{res}.toRgb')
-            image = rgbBlock(image, content, latent[:, latentIdx, :])
+            image = output_skip(image, content, latent[:, latent_idx, :])
 
         return image
 
 
-class SynthesisBlock(nn.Module):
-    """ Network block where ONE style is active + applying noise and bias"""
+class Skip(nn.Module):
+    """ Convert to RGB using output skips"""
 
-    def __init__(self, latentDim, inChannels, outChannels, kernelSize, doUpsample=False):
+    def __init__(self, latent_dim, in_channels, filter_size=4):
+        super(Skip, self).__init__()
+
+        self.torgb = ConvLayer(latent_dim, in_channels, out_channels=3, kernel_size=1, do_demod=False)
+        self.bias = nn.Parameter(torch.zeros((1, 3, 1, 1)))
+
+        # blur filter
+        # NOT parameter, just state
+        filter = SIZE_TO_BLUR_KERNEL[filter_size]
+        filter = torch.tensor(filter)
+        filter = filter.outer(filter)
+        filter = filter / filter.sum()
+        self.register_buffer("filter", filter)
+
+    def forward(self, previous_image, in_tensor, latent):
+        out_image = self.torgb(in_tensor, latent).add_(self.bias)
+        out_image = self._upsample_then_skip_connect(previous_image, out_image)
+
+        return out_image
+
+    def _upsample_then_skip_connect(self, previous_image, output_image):
+        if previous_image is not None:
+            # Upsampling
+            batch_size, in_channels, img_height, img_width = previous_image.shape
+            previous_image = previous_image.reshape(batch_size, in_channels, img_height, 1, img_width, 1)
+            previous_image = F.pad(previous_image, [0, 1, 0, 0, 0, 1])
+            previous_image = previous_image.reshape(batch_size, in_channels, img_height * 2, img_width * 2)
+            previous_image = F.pad(previous_image, [2, 1, 2, 1])
+
+            blur_filter = self.filter
+            blur_filter *= 4
+            blur_filter = blur_filter[None, None, :, :].repeat(in_channels, 1, 1, 1)
+            blur_filter = blur_filter.to(output_image.device)
+
+            previous_image = F.conv2d(previous_image, weight=blur_filter, groups=in_channels)
+
+            # Summing
+            output_image += previous_image
+
+        return output_image
+
+
+class SynthesisBlock(nn.Module):
+    """ two consecutive style blocks"""
+
+    def __init__(self, latent_dim, in_channels, out_channels, kernel_size, is_first_block=False):
         super(SynthesisBlock, self).__init__()
 
-        self.conv = ConvLayer(latentDim, inChannels, outChannels, kernelSize, doUpsample=doUpsample, doDemod=True)
-        initZeros = torch.zeros((1, outChannels, 1, 1))
-        self.bias = nn.Parameter(initZeros)
+        self._is_first_block = is_first_block
+        self._num_conv = 0
 
-        initZero = torch.zeros([])
-        self.noiseWeight = nn.Parameter(initZero)
+        if not is_first_block:
+            self.style_block_0 = ConvLayer(latent_dim, in_channels, out_channels, kernel_size, do_upsample=True, do_demod=True)
+            self.style_block_0_bias = nn.Parameter(torch.zeros((1, out_channels, 1, 1)))
+
+            self.noise_weight_0 = nn.Parameter(torch.zeros([]))
+
+            self._num_conv += 1
+
+        self.style_block_1 = ConvLayer(latent_dim, out_channels, out_channels, kernel_size, do_demod=True)
+        self.style_block_1_bias = nn.Parameter(torch.zeros((1, out_channels, 1, 1)))
+
+        self.noise_weight_1 = nn.Parameter(torch.zeros([]))
+
+        self._num_conv += 1
+
+    @property
+    def num_conv(self):
+        return self._num_conv
 
     def forward(self, content, latent):
+        target_latent_index = 0
+        if not self._is_first_block:
+            block_kwargs = {
+                "latent": latent[:, target_latent_index, :],
+                "style_block": self.style_block_0,
+                "style_block_bias": self.style_block_0_bias,
+                "noise_weight": self.noise_weight_0,
+            }
+            content = self._forward_block(content, **block_kwargs)
+
+            target_latent_index += 1
+
+        block_kwargs = {
+            "latent": latent[:, target_latent_index, :],
+            "style_block": self.style_block_1,
+            "style_block_bias": self.style_block_1_bias,
+            "noise_weight": self.noise_weight_1,
+        }
+        content = self._forward_block(content, **block_kwargs)
+
+        return content
+
+    def _forward_block(self, content, latent, style_block, style_block_bias, noise_weight):
         # Style Block
-        content = self.conv(content, latent)
+        content = style_block(content, latent)
 
         # NoiseInjection
-        batchSize, _, cHeight, cWidth = content.shape
-        noise = torch.randn((batchSize, 1, cHeight, cWidth), device=content.device)
-        content = content.add_(self.noiseWeight * noise)
+        batch_size, _, content_height, content_width = content.shape
+        noise = content.new_empty((batch_size, 1, content_height, content_width)).normal_()
+        content = content.add_(noise_weight * noise)
 
         # AddBias -> Activation
         # to retain expected signal variance, multiply sqrt(2)
-        content = F.leaky_relu(content.add_(self.bias), negative_slope=0.2) * np.sqrt(2)
+        content = F.leaky_relu(content.add_(style_block_bias), negative_slope=0.2) * np.sqrt(2)
 
         return content
 
@@ -191,30 +270,30 @@ class SynthesisBlock(nn.Module):
 class ConvLayer(nn.Module):
     """ Convolution Layer in StyleGAN2 """
 
-    def __init__(self, latentDim, inChannels, outChannels, kernelSize, filterSize=4, doUpsample=False, doDownsample=False, doDemod=True):
+    def __init__(self, latent_dim, in_channels, out_channels, kernel_size, filter_size=4, do_upsample=False, do_downsample=False, do_demod=True):
         super(ConvLayer, self).__init__()
 
-        assert doUpsample * doDownsample == 0
-        self._doUpsample = doUpsample
-        self._doDownsample = doDownsample
-        self._doDemod = doDemod
+        assert do_upsample * do_downsample == 0
+        self._do_upsample = do_upsample
+        self._do_downsample = do_downsample
+        self._do_demod = do_demod
 
-        if latentDim is not None:
-            self.affine = LinearLayer(latentDim, inChannels, doActivation=False)
+        if latent_dim is not None:
+            self.affine = LinearLayer(latent_dim, in_channels, do_activation=False)
             self.affine.bias.data.fill_(1)
         else:
             self.affine = None
 
-        kh, kw = [kernelSize] * 2
-        initNormalDist = torch.randn((outChannels, inChannels, kh, kw))
-        self.weight = nn.Parameter(initNormalDist)
+        kernel_height, kernel_width = [kernel_size] * 2
+        init_weight = torch.randn((out_channels, in_channels, kernel_height, kernel_width))
+        self.weight = nn.Parameter(init_weight)
 
         # padding
-        self._padding = kernelSize // 2
+        self._padding = kernel_size // 2
 
         # blur filter
         # NOT parameter, just state
-        filter = SIZE_TO_BLUR_KERNEL[filterSize]
+        filter = SIZE_TO_BLUR_KERNEL[filter_size]
         filter = torch.tensor(filter)
         filter = filter.outer(filter)
         filter = filter / filter.sum()
@@ -222,39 +301,39 @@ class ConvLayer(nn.Module):
 
         # Equalized Learning Rate
         # :: times sqrt(2/fan_in) for ReLU-type activation
-        fanIn = inChannels * kh * kw
-        self._weightMultiplier = np.sqrt(1. / fanIn)
+        fan_in = in_channels * kernel_height * kernel_width
+        self._weight_multiplier = np.sqrt(1. / fan_in)
 
     @property
-    def isModulationOff(self):
+    def is_modulation_off(self):
         return self.affine is None
 
-    def forward(self, inTensor, latent):
-        weight = self._normalizeWeight(latent)
-        outTensor = self._convMain(inTensor, weight)
+    def forward(self, in_tensor, latent):
+        weight = self._normalize_weight(latent)
+        out_tensor = self._conv_main(in_tensor, weight)
 
-        return outTensor
+        return out_tensor
 
-    def _normalizeWeight(self, latent):
-        if self.isModulationOff:
-            weight = self._equalizeLR()
+    def _normalize_weight(self, latent):
+        if self.is_modulation_off:
+            weight = self._equalize_lr()
         else:
             weight = self._modulate(latent)
 
         return weight
 
-    def _equalizeLR(self):
-        weight = self.weight * self._weightMultiplier
+    def _equalize_lr(self):
+        weight = self.weight * self._weight_multiplier
 
         return weight
 
     def _modulate(self, latent):
-        styleMultiplier = self._weightMultiplier if not self._doDemod else 1
+        style_multiplier = self._weight_multiplier if not self._do_demod else 1
 
-        style = self.affine(latent) * styleMultiplier
+        style = self.affine(latent) * style_multiplier
         weight = self.weight
 
-        # Reshape to [batchSize, outChannels, inChannels, kernelSize, kernelSize]
+        # Reshape to [batch_size, out_channels, in_channels, kernel_size, kernel_size]
         style = style.reshape(-1, 1, weight.size(dim=1), 1, 1)
         weight = weight.unsqueeze(0)
 
@@ -262,245 +341,196 @@ class ConvLayer(nn.Module):
         weight = weight * style
 
         # Demodulation
-        if self._doDemod:
+        if self._do_demod:
             norm = weight.square().sum(dim=[2, 3, 4], keepdim=True).add_(1e-8).rsqrt()
             weight = weight * norm
 
         return weight
 
-    def _convMain(self, inTensor, weight):
-        if self._doUpsample:
-            convFunc = self._transeposeStridedConvThenBlur
-        elif self._doDownsample:
-            convFunc = self._downsampleThenConv if weight.shape[-1] == 1 \
-                else self._blurThenStridedConv
-        elif self.isModulationOff:
-            convFunc = self._plainConv
+    def _conv_main(self, in_tensor, weight):
+        if self._do_upsample:
+            conv_func = self._transepose_strided_conv_then_blur
+        elif self._do_downsample:
+            conv_func = self._downsample_then_conv if weight.shape[-1] == 1 \
+                else self._blur_then_strided_conv
+        elif self.is_modulation_off:
+            conv_func = self._plain_conv
         else:
-            convFunc = self._groupConv
+            conv_func = self._group_conv
 
-        outTensor = convFunc(inTensor, weight)
+        out_tensor = conv_func(in_tensor, weight)
 
-        return outTensor
+        return out_tensor
 
-    def _transeposeStridedConvThenBlur(self, inTensor, weight):
-        batchSize, _, imgHeight, imgWidth = inTensor.shape
+    def _transepose_strided_conv_then_blur(self, in_tensor, weight):
+        batch_size, _, img_height, img_width = in_tensor.shape
 
         # transepose strided group convolution
-        inTensor = inTensor.reshape(1, -1, imgHeight, imgWidth)
+        in_tensor = in_tensor.reshape(1, -1, img_height, img_width)
         weight = weight.transpose(1, 2)
         weight = weight.reshape(-1, *weight.shape[2:])
 
-        outTensor = F.conv_transpose2d(inTensor, weight=weight, stride=2, padding=(0, 0), groups=batchSize)
+        out_tensor = F.conv_transpose2d(in_tensor, weight=weight, stride=2, padding=(0, 0), groups=batch_size)
 
         # Blur
-        outTensor = F.pad(outTensor, [1, 1, 1, 1])
+        out_tensor = F.pad(out_tensor, [1, 1, 1, 1])
 
-        numChannels = outTensor.size(dim=1)
+        num_channels = out_tensor.size(dim=1)
 
-        blurFilter = self.filter
-        blurFilter *= 4
-        blurFilter = blurFilter[None, None, :, :].repeat(numChannels, 1, 1, 1)
-        blurFilter = blurFilter.to(outTensor.device)
+        blur_filter = self.filter
+        blur_filter *= 4
+        blur_filter = blur_filter[None, None, :, :].repeat(num_channels, 1, 1, 1)
+        blur_filter = blur_filter.to(out_tensor.device)
 
-        outTensor = F.conv2d(outTensor, weight=blurFilter, groups=numChannels)
+        out_tensor = F.conv2d(out_tensor, weight=blur_filter, groups=num_channels)
 
-        # Reshape to [batchSize, outChannels, imgHeight, imgWidth]
-        outTensor = outTensor.reshape(batchSize, -1, *outTensor.shape[2:])
+        # Reshape to [batch_size, out_channels, img_height, img_width]
+        out_tensor = out_tensor.reshape(batch_size, -1, *out_tensor.shape[2:])
 
-        return outTensor
+        return out_tensor
 
-    def _blurThenStridedConv(self, inTensor, weight):
+    def _blur_then_strided_conv(self, in_tensor, weight):
         # Blur
-        outTensor = F.pad(inTensor, [2, 2, 2, 2])
+        out_tensor = F.pad(in_tensor, [2, 2, 2, 2])
 
-        numChannels = outTensor.size(dim=1)
+        num_channels = out_tensor.size(dim=1)
 
-        blurFilter = self.filter
-        blurFilter = blurFilter[None, None, :, :].repeat(numChannels, 1, 1, 1)
-        blurFilter = blurFilter.to(outTensor.device)
+        blur_filter = self.filter
+        blur_filter = blur_filter[None, None, :, :].repeat(num_channels, 1, 1, 1)
+        blur_filter = blur_filter.to(out_tensor.device)
 
-        outTensor = F.conv2d(outTensor, weight=blurFilter, groups=numChannels)
+        out_tensor = F.conv2d(out_tensor, weight=blur_filter, groups=num_channels)
 
         # strided convolution
-        outTensor = F.conv2d(outTensor, weight=weight, stride=2)
+        out_tensor = F.conv2d(out_tensor, weight=weight, stride=2)
 
-        return outTensor
+        return out_tensor
 
-    def _downsampleThenConv(self, inTensor, weight):
+    def _downsample_then_conv(self, in_tensor, weight):
         # downsample
-        outTensor = F.pad(inTensor, [1, 1, 1, 1])
+        out_tensor = F.pad(in_tensor, [1, 1, 1, 1])
 
-        numChannels = outTensor.size(dim=1)
+        num_channels = out_tensor.size(dim=1)
 
-        blurFilter = self.filter
-        blurFilter = blurFilter[None, None, :, :].repeat(numChannels, 1, 1, 1)
-        blurFilter = blurFilter.to(outTensor.device)
+        blur_filter = self.filter
+        blur_filter = blur_filter[None, None, :, :].repeat(num_channels, 1, 1, 1)
+        blur_filter = blur_filter.to(out_tensor.device)
 
-        outTensor = F.conv2d(outTensor, weight=blurFilter, groups=numChannels)
-        outTensor = outTensor[:, :, ::2, ::2]
+        out_tensor = F.conv2d(out_tensor, weight=blur_filter, groups=num_channels)
+        out_tensor = out_tensor[:, :, ::2, ::2]
 
         # convolution
-        outTensor = F.conv2d(outTensor, weight=weight)
+        out_tensor = F.conv2d(out_tensor, weight=weight)
 
-        return outTensor
+        return out_tensor
 
-    def _plainConv(self, inTensor, weight):
-        outTensor = F.conv2d(inTensor, weight=weight, padding=self._padding)
+    def _plain_conv(self, in_tensor, weight):
+        out_tensor = F.conv2d(in_tensor, weight=weight, padding=self._padding)
 
-        return outTensor
+        return out_tensor
 
-    def _groupConv(self, inTensor, weight):
-        batchSize, _, imgHeight, imgWidth = inTensor.shape
+    def _group_conv(self, in_tensor, weight):
+        batch_size, _, img_height, img_width = in_tensor.shape
 
         # Group Convolution sees one sample with N groups
-        inTensor = inTensor.reshape(1, -1, imgHeight, imgWidth)
+        in_tensor = in_tensor.reshape(1, -1, img_height, img_width)
         weight = weight.reshape(-1, *weight.shape[2:])
 
-        outTensor = F.conv2d(inTensor, weight=weight, padding=self._padding, groups=batchSize)
+        out_tensor = F.conv2d(in_tensor, weight=weight, padding=self._padding, groups=batch_size)
 
-        # Reshape to [batchSize, outChannels, imgHeight, imgWidth]
-        outTensor = outTensor.reshape(batchSize, -1, *outTensor.shape[2:])
+        # Reshape to [batch_size, out_channels, img_height, img_width]
+        out_tensor = out_tensor.reshape(batch_size, -1, *out_tensor.shape[2:])
 
-        return outTensor
-
-
-class ToRgb(nn.Module):
-    """ Convert to RGB using output skips"""
-
-    def __init__(self, latentDim, inChannels, filterSize=4):
-        super(ToRgb, self).__init__()
-
-        self.conv = ConvLayer(latentDim, inChannels, outChannels=3, kernelSize=1, doDemod=False)
-        initZeros = torch.zeros((1, 3, 1, 1))
-        self.bias = nn.Parameter(initZeros)
-
-        # blur filter
-        # NOT parameter, just state
-        filter = SIZE_TO_BLUR_KERNEL[filterSize]
-        filter = torch.tensor(filter)
-        filter = filter.outer(filter)
-        filter = filter / filter.sum()
-        self.register_buffer("filter", filter)
-
-    def forward(self, prevTensor, inTensor, latent):
-        outTensor = self.conv(inTensor, latent).add_(self.bias)
-        outTensor = self._skipConnectionAfterUpsample(prevTensor, outTensor)
-
-        return outTensor
-
-    def _skipConnectionAfterUpsample(self, prevImg, outputImg):
-        if prevImg is not None:
-            # Upsampling
-            batchSize, inChannel, imageHeight, imageWidth = prevImg.shape
-            prevImg = prevImg.reshape(batchSize, inChannel, imageHeight, 1, imageWidth, 1)
-            prevImg = F.pad(prevImg, [0, 1, 0, 0, 0, 1])
-            prevImg = prevImg.reshape(batchSize, inChannel, imageHeight * 2, imageWidth * 2)
-            prevImg = F.pad(prevImg, [2, 1, 2, 1])
-
-            blurFilter = self.filter
-            blurFilter *= 4
-            blurFilter = blurFilter[None, None, :, :].repeat(inChannel, 1, 1, 1)
-            blurFilter = blurFilter.to(outputImg.device)
-
-            prevImg = F.conv2d(prevImg, weight=blurFilter, groups=inChannel)
-
-            # Summing
-            outputImg += prevImg
-
-        return outputImg
+        return out_tensor
 
 
 class Discriminator(nn.Module):
-    def __init__(self, targetResolution, minibatchGroup=1):
+    def __init__(self, target_resolution, minibatch_group=1):
         super(Discriminator, self).__init__()
 
-        self._minibatchGroup = minibatchGroup
+        self._minibatch_group = minibatch_group
 
         # list ranging from targetResolution to 8
-        self._resolutionGroup = list(reversed([x for x in RES_TO_CHANNELS.keys() if x <= targetResolution]))[:-1]
+        self._resolution_group = list(reversed([x for x in RES_TO_CHANNELS.keys() if x <= target_resolution]))[:-1]
 
-        inChannel = RES_TO_CHANNELS[targetResolution]
-        initZeros = torch.zeros((1, inChannel, 1, 1))
-        self.frgbBias = nn.Parameter(initZeros)
-        self.fromRgb = ConvLayer(None, 3, inChannel, 1)
+        in_channels = RES_TO_CHANNELS[target_resolution]
+        self.fromrgb = ConvLayer(None, 3, in_channels, 1)
+        self.fromrgb_bias = nn.Parameter(torch.zeros((1, in_channels, 1, 1)))
 
         self.downsamples = nn.ModuleList()
         self.blocks = nn.ModuleList()
-        for resolution in self._resolutionGroup:
-            outChannel = RES_TO_CHANNELS[resolution // 2]
-            self.downsamples.append(ConvLayer(None, inChannel, outChannel, kernelSize=1, doDownsample=True))
-            self.blocks.append(DiscriminatorBlock(inChannel, outChannel, kernelSize=3))
-            inChannel = outChannel
+        for resolution in self._resolution_group:
+            out_channels = RES_TO_CHANNELS[resolution // 2]
+            self.downsamples.append(ConvLayer(None, in_channels, out_channels, kernel_size=1, do_downsample=True))
+            self.blocks.append(DiscriminatorBlock(in_channels, out_channels, kernel_size=3))
+            in_channels = out_channels
 
-        outChannel = RES_TO_CHANNELS[4]
-        self.finalConv = ConvLayer(None, inChannel + self._minibatchGroup, outChannel, kernelSize=3)
-        initZeros = torch.zeros((1, outChannel, 1, 1))
-        self.finalConvBias = nn.Parameter(initZeros)
+        out_channels = RES_TO_CHANNELS[4]
+        self.final_conv = ConvLayer(None, in_channels + self._minibatch_group, out_channels, kernel_size=3)
+        initZeros = torch.zeros((1, out_channels, 1, 1))
+        self.final_conv_bias = nn.Parameter(initZeros)
 
-        self.finalLinear = nn.Sequential(
-            LinearLayer(outChannel * 4 * 4, outChannel),
-            LinearLayer(outChannel, 1, doActivation=False)
+        self.final_linear = nn.Sequential(
+            LinearLayer(out_channels * 4 * 4, out_channels),
+            LinearLayer(out_channels, 1, do_activation=False)
         )
 
     def forward(self, image):
         # from Rgb
-        inTensor = self.fromRgb(image)
-        inTensor = F.leaky_relu(inTensor.add_(self.frgbBias), negative_slope=0.2) * np.sqrt(2)
+        in_tensor = self.fromrgb(image)
+        in_tensor = F.leaky_relu(in_tensor.add_(self.fromrgb_bias), negative_slope=0.2) * np.sqrt(2)
 
         # residual
         for downsample, block in zip(self.downsamples, self.blocks):
-            downTensor = downsample(inTensor, None)
-            outTensor = block(inTensor)
+            downTensor = downsample(in_tensor, None)
+            out_tensor = block(in_tensor)
 
             # adding
-            inTensor = (downTensor + outTensor) / np.sqrt(2)
+            in_tensor = (downTensor + out_tensor) / np.sqrt(2)
 
         # minibatch std
-        outTensor = self._minibatchStd(inTensor)
+        out_tensor = self._minibatch_std(in_tensor)
 
         # final conv -> final fully connected
-        outTensor = self.finalConv(outTensor)
-        outTensor = F.leaky_relu(outTensor.add_(self.finalConvBias), negative_slope=0.2) * np.sqrt(2)
+        out_tensor = self.final_conv(out_tensor)
+        out_tensor = F.leaky_relu(out_tensor.add_(self.final_conv_bias), negative_slope=0.2) * np.sqrt(2)
 
-        out = self.finalLinear(outTensor.flatten(start_dim=1))
+        out = self.final_linear(out_tensor.flatten(start_dim=1))
 
         return out
 
-    def _minibatchStd(self, inTensor):
-        batchSize, inChannel, imageHeight, imageWidth = inTensor.shape
+    def _minibatch_std(self, in_tensor):
+        batch_size, in_channels, img_height, img_width = in_tensor.shape
 
-        stddev = inTensor.view(self._minibatchGroup, -1, 1, inChannel, imageHeight, imageWidth)
+        stddev = in_tensor.view(self._minibatch_group, -1, 1, in_channels, img_height, img_width)
         stddev = torch.sqrt(stddev.var(0, unbiased=False) + EPSILON)
         stddev = stddev.mean([2, 3, 4], keepdims=True).squeeze(2)
-        stddev = stddev.repeat(self._minibatchGroup, 1, imageHeight, imageWidth)
+        stddev = stddev.repeat(self._minibatch_group, 1, img_height, img_width)
 
-        outTensor = torch.cat([inTensor, stddev], dim=1)
+        out_tensor = torch.cat([in_tensor, stddev], dim=1)
 
-        return outTensor
+        return out_tensor
 
 
 class DiscriminatorBlock(nn.Module):
     """ Network block where two consecutive conv layers applied """
 
-    def __init__(self, inChannels, outChannels, kernelSize):
+    def __init__(self, in_channels, out_channels, kernel_size):
         super(DiscriminatorBlock, self).__init__()
 
-        self.conv0 = ConvLayer(None, inChannels, inChannels, kernelSize)
-        initZeros = torch.zeros((1, inChannels, 1, 1))
-        self.bias0 = nn.Parameter(initZeros)
+        self.conv0 = ConvLayer(None, in_channels, in_channels, kernel_size)
+        self.bias0 = nn.Parameter(torch.zeros((1, in_channels, 1, 1)))
 
-        self.conv1 = ConvLayer(None, inChannels, outChannels, kernelSize, doDownsample=True)
-        initZeros = torch.zeros((1, outChannels, 1, 1))
-        self.bias1 = nn.Parameter(initZeros)
+        self.conv1 = ConvLayer(None, in_channels, out_channels, kernel_size, do_downsample=True)
+        self.bias1 = nn.Parameter(torch.zeros((1, out_channels, 1, 1)))
 
-    def forward(self, inTensor):
+    def forward(self, in_tensor):
         # conv0 layer
-        outTensor = self.conv0(inTensor, None)
-        outTensor = F.leaky_relu(outTensor.add_(self.bias0), negative_slope=0.2) * np.sqrt(2)
+        out_tensor = self.conv0(in_tensor, None)
+        out_tensor = F.leaky_relu(out_tensor.add_(self.bias0), negative_slope=0.2) * np.sqrt(2)
 
         # conv1 layer
-        outTensor = self.conv1(outTensor, None)
-        outTensor = F.leaky_relu(outTensor.add_(self.bias1), negative_slope=0.2) * np.sqrt(2)
+        out_tensor = self.conv1(out_tensor, None)
+        out_tensor = F.leaky_relu(out_tensor.add_(self.bias1), negative_slope=0.2) * np.sqrt(2)
 
-        return outTensor
+        return out_tensor
