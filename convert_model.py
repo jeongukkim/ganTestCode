@@ -1,16 +1,30 @@
+"""
+convert official StyleGAN2 checkpoints (see https://github.com/NVlabs/stylegan2-ada-pytorch)
+to OURs
+"""
+
 import sys
 import torch
 import pickle
-from model import Generator
+from model import Generator, Discriminator
 
 
 torch.manual_seed(0)
 
 
-def loadMappingNetwork(srcG, myDict):
-    for i in range(8):
-        myDict[f"mapping.fcs.{i}.weight"] = srcG.state_dict()[f"mapping.fc{i}.weight"]
-        myDict[f"mapping.fcs.{i}.bias"] = srcG.state_dict()[f"mapping.fc{i}.bias"]
+def convertOfficialModelToOurs(srcG, srcD, dstG, dstD):
+    myGDict = {}
+    loadMappingNetwork(srcG, myGDict)
+    loadConstInput(srcG, myGDict)
+    loadConvBlocks(srcG, myGDict)
+    loadAffineNetwork(srcG, myGDict)
+    loadNoiseInjection(srcG, myGDict)
+    loadToRgb(srcG, myGDict)
+    dstG.load_state_dict(myGDict, strict=False)
+
+    myDDict = {}
+    loadDiscriminator(srcD, myDDict)
+    dstD.load_state_dict(myDDict, strict=False)
 
 
 def testMappingNetwork(srcG, dstG):
@@ -34,6 +48,12 @@ def testMappingNetwork(srcG, dstG):
     # print(wSrc)
     # print(wDst)
     print(wSrc - wDst)
+
+
+def loadMappingNetwork(srcG, myDict):
+    for i in range(8):
+        myDict[f"mapping.fcs.{i}.weight"] = srcG.state_dict()[f"mapping.fc{i}.weight"]
+        myDict[f"mapping.fcs.{i}.bias"] = srcG.state_dict()[f"mapping.fc{i}.bias"]
 
 
 def testSynthesisNetwork(srcG, dstG):
@@ -140,6 +160,42 @@ def showImg(genOutput):
     plt.show()
 
 
+def testDiscriminator(srcG, srcD, dstD):
+    myDict = {}
+    loadDiscriminator(srcD, myDict)
+    dstD.load_state_dict(myDict, strict=False)
+
+    # print(srcD.state_dict()["b4.fc.bias"])
+    # print(dstD.state_dict()["final_linear.0.bias"])
+
+    latent = torch.randn([1, 512]).cuda()
+    c = None
+    image = srcG(latent, c)
+
+    print(srcD(image, c))
+    print(dstD(image))
+
+    showImg(image)
+
+
+def loadDiscriminator(srcD, myDict):
+    myDict["fromrgb.weight"] = srcD.state_dict()["b256.fromrgb.weight"]
+    myDict["fromrgb_bias"] = srcD.state_dict()["b256.fromrgb.bias"].reshape(1, -1, 1, 1)
+    for i, level in enumerate(range(8, 2, -1)):
+        res = int(2 ** level)
+        myDict[f"downsamples.{i}.weight"] = srcD.state_dict()[f"b{res}.skip.weight"]
+        myDict[f"blocks.{i}.conv0.weight"] = srcD.state_dict()[f"b{res}.conv0.weight"]
+        myDict[f"blocks.{i}.bias0"] = srcD.state_dict()[f"b{res}.conv0.bias"].reshape(1, -1, 1, 1)
+        myDict[f"blocks.{i}.conv1.weight"] = srcD.state_dict()[f"b{res}.conv1.weight"]
+        myDict[f"blocks.{i}.bias1"] = srcD.state_dict()[f"b{res}.conv1.bias"].reshape(1, -1, 1, 1)
+    myDict["final_conv.weight"] = srcD.state_dict()["b4.conv.weight"]
+    myDict["final_conv_bias"] = srcD.state_dict()["b4.conv.bias"].reshape(1, -1, 1, 1)
+    myDict["final_linear.0.weight"] = srcD.state_dict()["b4.fc.weight"]
+    myDict["final_linear.0.bias"] = srcD.state_dict()["b4.fc.bias"]
+    myDict["final_linear.1.weight"] = srcD.state_dict()["b4.out.weight"]
+    myDict["final_linear.1.bias"] = srcD.state_dict()["b4.out.bias"]
+
+
 if __name__ == "__main__":
     sys.path.insert(0, "C:\\Projects\\stylegan2-ada-pytorch-main\\")
 
@@ -149,10 +205,33 @@ if __name__ == "__main__":
     loadD = files['D'].cuda()
 
     G = Generator(target_resolution=256).cuda()
+    D = Discriminator(target_resolution=256).cuda()
 
-    print(loadG.state_dict().keys())
-    print(G.state_dict().keys())
-    print(loadD.state_dict().keys())
+    # print(loadG.state_dict().keys())
+    # print(G.state_dict().keys())
+    # print(loadD.state_dict().keys())
+    # print(D.state_dict().keys())
 
-    testMappingNetwork(loadG, G)
-    testSynthesisNetwork(loadG, G)
+    # testMappingNetwork(loadG, G)
+    # testSynthesisNetwork(loadG, G)
+
+    # testDiscriminator(loadG, loadD, D)
+
+    convertOfficialModelToOurs(loadG, loadD, G, D)
+
+    # Final test
+    # latent = torch.randn([1, 512]).cuda()
+    # c = None
+    # imgOrig = loadG(latent, c)
+    # imgNew = G(latent)
+    #
+    # showImg(imgOrig)
+    # showImg(imgNew)
+    #
+    # print(loadD(imgOrig, c))
+    # print(D(imgNew))
+
+    torch.save({
+        "G_ema": G,
+        "D": D,
+    },  "./ckpt/myStyleGan2.pth")
