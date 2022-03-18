@@ -72,7 +72,7 @@ class MappingNetwork(nn.Module):
         return self._num_layers
 
     def forward(self, latent):
-        latent = latent * latent.square().mean(dim=1, keepdim=True).add_(EPSILON).rsqrt()
+        latent = latent * (latent.square().mean(dim=1, keepdim=True)+EPSILON).rsqrt()
         intermediate_latent = self.fcs(latent)
 
         return intermediate_latent
@@ -103,9 +103,9 @@ class LinearLayer(nn.Module):
 
         if self._do_activation:
             # to retain expected signal variance, multiply sqrt(2)
-            latent = F.leaky_relu(latent.add_(b), negative_slope=0.2) * np.sqrt(2)
+            latent = F.leaky_relu(latent + b, negative_slope=0.2) * np.sqrt(2)
         else:
-            latent = latent.add_(b)
+            latent = latent + b
 
         return latent
 
@@ -173,7 +173,7 @@ class Skip(nn.Module):
         self.register_buffer("filter", filter)
 
     def forward(self, previous_image, in_tensor, latent):
-        out_image = self.torgb(in_tensor, latent).add_(self.bias)
+        out_image = self.torgb(in_tensor, latent) + self.bias
         out_image = self._upsample_then_skip_connect(previous_image, out_image)
 
         return out_image
@@ -195,7 +195,7 @@ class Skip(nn.Module):
             previous_image = F.conv2d(previous_image, weight=blur_filter, groups=in_channels)
 
             # Summing
-            output_image += previous_image
+            output_image = output_image + previous_image
 
         return output_image
 
@@ -258,11 +258,11 @@ class SynthesisBlock(nn.Module):
         # NoiseInjection
         batch_size, _, content_height, content_width = content.shape
         noise = content.new_empty((batch_size, 1, content_height, content_width)).normal_()
-        content = content.add_(noise_weight * noise)
+        content = content + noise_weight * noise
 
         # AddBias -> Activation
         # to retain expected signal variance, multiply sqrt(2)
-        content = F.leaky_relu(content.add_(style_block_bias), negative_slope=0.2) * np.sqrt(2)
+        content = F.leaky_relu(content + style_block_bias, negative_slope=0.2) * np.sqrt(2)
 
         return content
 
@@ -477,8 +477,8 @@ class Discriminator(nn.Module):
 
     def forward(self, image):
         # from Rgb
-        in_tensor = self.fromrgb(image)
-        in_tensor = F.leaky_relu(in_tensor.add_(self.fromrgb_bias), negative_slope=0.2) * np.sqrt(2)
+        in_tensor = self.fromrgb(image, None)
+        in_tensor = F.leaky_relu(in_tensor + self.fromrgb_bias, negative_slope=0.2) * np.sqrt(2)
 
         # residual
         for downsample, block in zip(self.downsamples, self.blocks):
@@ -486,14 +486,15 @@ class Discriminator(nn.Module):
             out_tensor = block(in_tensor)
 
             # adding
+            # to retain expected signal variance, divide by sqrt(2)
             in_tensor = (downTensor + out_tensor) / np.sqrt(2)
 
         # minibatch std
         out_tensor = self._minibatch_std(in_tensor)
 
         # final conv -> final fully connected
-        out_tensor = self.final_conv(out_tensor)
-        out_tensor = F.leaky_relu(out_tensor.add_(self.final_conv_bias), negative_slope=0.2) * np.sqrt(2)
+        out_tensor = self.final_conv(out_tensor, None)
+        out_tensor = F.leaky_relu(out_tensor + self.final_conv_bias, negative_slope=0.2) * np.sqrt(2)
 
         out = self.final_linear(out_tensor.flatten(start_dim=1))
 
@@ -527,10 +528,10 @@ class DiscriminatorBlock(nn.Module):
     def forward(self, in_tensor):
         # conv0 layer
         out_tensor = self.conv0(in_tensor, None)
-        out_tensor = F.leaky_relu(out_tensor.add_(self.bias0), negative_slope=0.2) * np.sqrt(2)
+        out_tensor = F.leaky_relu(out_tensor + self.bias0, negative_slope=0.2) * np.sqrt(2)
 
         # conv1 layer
         out_tensor = self.conv1(out_tensor, None)
-        out_tensor = F.leaky_relu(out_tensor.add_(self.bias1), negative_slope=0.2) * np.sqrt(2)
+        out_tensor = F.leaky_relu(out_tensor + self.bias1, negative_slope=0.2) * np.sqrt(2)
 
         return out_tensor
